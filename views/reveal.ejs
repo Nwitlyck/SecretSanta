@@ -1,0 +1,19 @@
+<%- include('partials/header') %>
+<main class="reveal-page" id="main-content">
+  <span class="eyebrow">UN PEQUEÑO SECRETO, SOLO PARA TI</span>
+  <h1>Hola, <em><%= assignment.giver %>.</em></h1>
+  <p class="muted">Ya salió el nombre. ¡Es hora de elegir un regalo con cariño!</p>
+  <section class="assignment-card" aria-label="Tu asignación de amigo secreto">
+    <div class="assignment-star" aria-hidden="true">✳</div>
+    <span class="eyebrow">TE TOCA REGALARLE A</span>
+    <h2 class="recipient"><%= assignment.recipient %></h2>
+    <div class="assignment-divider"><span></span><span aria-hidden="true">✦</span><span></span></div>
+    <p>Un detalle con cariño hace la diferencia.<br>Elige algo que le saque una sonrisa.</p>
+    <span class="keep-secret">Que quede entre nosotros.</span>
+  </section>
+  <p class="remember-note"><span aria-hidden="true">⌁</span> Recordaremos tu asignación en este navegador durante 60 días.</p>
+  <p class="small muted">Guarda tu invitación original en un lugar seguro. La necesitarás si usas otro dispositivo o borras las cookies.</p>
+  <details class="shared-device"><summary>¿Compartes este dispositivo?</summary><p class="small muted">Al terminar, puedes borrar tu asignación de este navegador. Tu invitación seguirá funcionando hasta que venza.</p><form method="post" action="/forget"><input type="hidden" name="_csrf" value="<%= csrf %>"><button class="text-button" type="submit">Borrar mi asignación de este dispositivo</button></form></details>
+  <form method="post" action="/reveal" id="invitation-form" hidden><input type="hidden" name="_csrf" value="<%= csrf %>"><input type="hidden" id="invitation" name="token"></form>
+</main>
+<%- include('partials/footer') %>

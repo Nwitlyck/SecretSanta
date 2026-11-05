@@ -1,0 +1,18 @@
+<%- include('partials/header') %>
+<main class="centered-page">
+  <div class="login-intro"><span class="eyebrow">BEHIND THE HOLIDAY MAGIC</span><h1>The organizer’s<br><em>desk.</em></h1><p>A few names. A little shuffle. A whole lot of smiles.</p></div>
+  <section class="panel login-panel" aria-labelledby="login-heading">
+    <div class="section-icon" aria-hidden="true">✳</div>
+    <h2 id="login-heading">Let’s get everyone together.</h2>
+    <p class="muted">Enter your organizer password to set up the exchange.</p>
+    <% if (error) { %><p class="notice error" role="alert"><%= error %></p><% } %>
+    <form method="post" action="/admin/login">
+      <input type="hidden" name="_csrf" value="<%= csrf %>">
+      <label class="field-label" for="password">Organizer password</label>
+      <input type="password" id="password" name="password" autocomplete="current-password" required maxlength="1024" placeholder="Your password">
+      <button type="submit" class="button button-primary full-width">Step inside <span aria-hidden="true">↗</span></button>
+    </form>
+    <p class="card-footnote">A private space for the person making it happen.</p>
+  </section>
+</main>
+<%- include('partials/footer') %>

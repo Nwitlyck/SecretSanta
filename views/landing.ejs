@@ -1,0 +1,35 @@
+<%- include('partials/header') %>
+<main id="main-content">
+  <section class="hero">
+    <div class="hero-copy">
+      <span class="eyebrow"><span class="tiny-star" aria-hidden="true">✳</span> LA ALEGRÍA ESTÁ EN REGALAR</span>
+      <h1>Un poco de misterio.<br>Mucha <em>alegría.</em></h1>
+      <p class="hero-description">Un regalo con cariño. Una linda sorpresa.<br>Un intercambio secreto con tus personas favoritas.</p>
+      <div class="invitation-card">
+        <div class="card-heading"><span class="step-dot">01</span><h2>Tu sorpresa empieza aquí</h2></div>
+        <p>¿Ya tienes tu invitación? Abre tu enlace personal o pégalo aquí para descubrir a quién le vas a regalar.</p>
+        <% if (error) { %><p class="notice error" role="alert"><%= error %></p><% } %>
+        <form method="post" action="/reveal" id="invitation-form">
+          <input type="hidden" name="_csrf" value="<%= csrf %>">
+          <label class="field-label" for="invitation">Tu enlace o código de invitación</label>
+          <input type="text" id="invitation" name="token" placeholder="Pega tu invitación aquí" required maxlength="4000" autocomplete="off" spellcheck="false" autocapitalize="none">
+          <button class="button button-primary full-width" type="submit">Descubrir a quién le regalo <span aria-hidden="true">↗</span></button>
+        </form>
+        <div class="card-footnote"><span aria-hidden="true">⌁</span> Solo necesitas tu enlace. Sin crear una cuenta.</div>
+      </div>
+    </div>
+    <div class="hero-visual">
+      <div class="edition-label">EL INTERCAMBIO DE AMIGO SECRETO <span>✦</span></div>
+      <%- include('partials/gift') %>
+      <div class="handwritten">un pequeño regalo, una gran sonrisa.</div>
+      <div class="visual-note"><span class="small-rule"></span> UN TOQUE DE MAGIA NAVIDEÑA <span class="small-rule"></span></div>
+    </div>
+  </section>
+  <section class="how-it-works" aria-label="Cómo funciona el intercambio">
+    <div class="how-intro"><span class="eyebrow">MENOS PLANES, MÁS REGALOS</span><h2>Un lindo secreto.<br> En tres pasos.</h2></div>
+    <div class="how-step"><span class="step-number">01 /</span><h3>Reúnan al grupo</h3><p>Quien organiza agrega a todos y deja que el azar decida a quién le regala cada persona.</p></div>
+    <div class="how-step"><span class="step-number">02 /</span><h3>Abre tu invitación</h3><p>Tu enlace privado revela un nombre. Lo recordaremos en este navegador durante 60 días.</p></div>
+    <div class="how-step"><span class="step-number">03 /</span><h3>Regala una sonrisa</h3><p>Elige un detalle especial, envuélvelo con cariño y guarda el secreto.</p></div>
+  </section>
+</main>
+<%- include('partials/footer') %>

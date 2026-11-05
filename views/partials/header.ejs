@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="<%= lang %>">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="<%= lang === 'es' ? 'Un poco de misterio. Mucha alegría. Un intercambio de amigo secreto para tus personas favoritas.' : 'A little mystery. A lot of joy. A private Secret Santa exchange for your favorite people.' %>">
+  <meta name="theme-color" content="#a63832">
+  <title><%= title %></title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="stylesheet" href="/assets/styles.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <div class="top-strip"><%= lang === 'es' ? 'LOS MEJORES REGALOS EMPIEZAN CON UN SECRETO.' : 'GOOD GIFTS START WITH A LITTLE SECRET.' %></div>
+  <div class="site-shell">
+    <header class="site-header">
+      <a class="brand" href="/" aria-label="<%= lang === 'es' ? 'Amigo secreto: inicio' : 'Secret Santa home' %>">
+        <svg class="brand-icon" width="32" height="32" viewBox="0 0 32 32" fill="none" aria-hidden="true"><path d="M5 13h22v7H5zM7 20h18v10H7zM16 13v17M16 13c-12 1-11-11-5-9 4 1 5 9 5 9Zm0 0c12 1 11-11 5-9-4 1-5 9-5 9Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+        <span><%= lang === 'es' ? 'amigo secreto' : 'secret santa' %><span class="brand-period">.</span></span>
+      </a>
+      <nav aria-label="<%= lang === 'es' ? 'Navegación principal' : 'Main navigation' %>">
+        <a href="/" class="nav-link <%= page === 'home' || page === 'reveal' ? 'active' : '' %>" <%- page === 'home' || page === 'reveal' ? 'aria-current="page"' : '' %>><%= lang === 'es' ? 'Tu invitación' : 'Your invitation' %></a>
+        <a href="/admin" class="nav-link <%= page === 'admin' ? 'active' : '' %>" <%- page === 'admin' ? 'aria-current="page"' : '' %>><%= lang === 'es' ? 'Organizador' : 'Organizer' %> <span aria-hidden="true">↗</span></a>
+      </nav>
+    </header>
