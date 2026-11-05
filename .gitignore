@@ -1,0 +1,8 @@
+node_modules/
+.env
+.env.*
+!.env.example
+.tools/
+coverage/
+*.log
+secret-santa-links-*.json
