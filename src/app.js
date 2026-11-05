@@ -35,7 +35,7 @@ export function createApp(config, { wishStore } = {}) {
   app.use(helmet({
     contentSecurityPolicy: { directives: {
       defaultSrc: ["'none'"], scriptSrc: ["'self'"], styleSrc: ["'self'"],
-      imgSrc: ["'self'", 'data:'], fontSrc: ["'self'"], connectSrc: ["'self'"],
+      imgSrc: ["'self'", 'data:'], mediaSrc: ["'self'"], fontSrc: ["'self'"], connectSrc: ["'self'"],
       formAction: ["'self'"], baseUri: ["'none'"], frameAncestors: ["'none'"],
       upgradeInsecureRequests: config.production ? [] : null,
     } },

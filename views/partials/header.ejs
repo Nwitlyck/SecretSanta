@@ -11,6 +11,10 @@
   <script src="/assets/app.js" defer></script>
 </head>
 <body>
+  <div class="page-loader" id="page-loader" role="status" aria-live="polite">
+    <video id="page-loader-video" src="/assets/feliz-navidad-santa.mp4" autoplay muted playsinline loop preload="auto" aria-hidden="true" disablepictureinpicture></video>
+    <p><%= lang === 'es' ? 'Preparando tu sorpresa…' : 'Getting your surprise ready…' %></p>
+  </div>
   <div class="top-strip"><%= lang === 'es' ? 'LOS MEJORES REGALOS EMPIEZAN CON UN SECRETO.' : 'GOOD GIFTS START WITH A LITTLE SECRET.' %></div>
   <div class="site-shell">
     <header class="site-header">

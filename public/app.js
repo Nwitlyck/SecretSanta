@@ -1,5 +1,26 @@
 'use strict';
 
+const pageLoader = document.getElementById('page-loader');
+if (pageLoader) {
+  const video = document.getElementById('page-loader-video');
+  const content = document.querySelector('.site-shell');
+  document.body.classList.add('page-loading');
+  if (content) content.inert = true;
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) video.pause();
+  else video.play().catch(() => {}); // Autoplay restrictions must never block the page.
+  const finishLoading = () => {
+    pageLoader.hidden = true;
+    video.pause();
+    document.body.classList.remove('page-loading');
+    if (content) content.inert = false;
+  };
+  // Always reveal the page after two seconds, even if the video fails to load.
+  setTimeout(finishLoading, 2000);
+  window.addEventListener('pageshow', event => {
+    if (event.persisted) finishLoading();
+  });
+}
+
 const toast = document.getElementById('toast');
 let toastTimer;
 function announce(message) {
