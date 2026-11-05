@@ -10,3 +10,14 @@
   html[lang="es"] .site-header nav{width:100%;justify-content:space-between;gap:16px}
   html[lang="es"] .nav-link{white-space:nowrap;padding:0}
 }
+.wishlist-panel{max-width:540px;margin:20px auto;text-align:left;scroll-margin-top:24px}
+.wishlist-panel>.eyebrow{color:var(--red);font-size:8px;letter-spacing:1.5px}
+.wishlist-panel h2{margin:10px 0 14px;overflow-wrap:anywhere}
+.wishlist-panel>.muted{font-size:12px;line-height:1.9}
+.wishlist-panel textarea{min-height:145px}
+.wishlist-text{white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px;line-height:1.9;margin:16px 0;padding:17px 18px;background:var(--cream);border-left:2px solid #b89053;border-radius:0 4px 4px 0;text-align:left}
+.wishlist-empty{margin:14px 0}
+.wishlist-panel .wishlist-sync{font-size:10px;line-height:1.8;margin-top:14px}
+.wishlist-panel .wishlist-help{margin-top:14px;font-size:10px;line-height:1.8}
+.wishlist-panel .input-caption{flex-wrap:wrap}
+.notice.success{background:#edf2e9;border-color:#cddac3;color:#3d5b39}

@@ -1,15 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import path from 'node:path';
+import { tmpdir } from 'node:os';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
 import { createAssignments, parseParticipants } from '../src/matching.js';
 import { ADMIN_TTL, ASSIGNMENT_TTL, createTokenService } from '../src/tokens.js';
+import { createWishStore, MAX_WISH_LENGTH } from '../src/wishes.js';
 
 const env = {
   ADMIN_PASSWORD: 'a-long-test-password-only',
   SESSION_SECRET: 'a-test-only-secret-with-at-least-32-bytes-of-material',
   PARTICIPANTS: 'Alice,Bob,Charlie,Dave',
+  WISHLIST_DB_PATH: './data/wishes.sqlite',
 };
 
 test('configuration rejects missing or unsafe secrets and production origins', () => {
@@ -22,6 +27,9 @@ test('configuration rejects missing or unsafe secrets and production origins', (
   assert.throws(() => loadConfig({ ...env, APP_URL: 'https://user:pass@example.com' }), /credentials/);
   assert.throws(() => loadConfig({ ...env, TRUST_PROXY: 'true' }), /TRUST_PROXY/);
   assert.equal(loadConfig({ ...env, NODE_ENV: 'production', RAILWAY_PUBLIC_DOMAIN: 'santa.up.railway.app' }).origin, 'https://santa.up.railway.app');
+  assert.throws(() => loadConfig({ ...env, NODE_ENV: 'production', APP_URL: 'https://santa.example', WISHLIST_DB_PATH: '' }), /persistent volume/);
+  assert.throws(() => loadConfig({ ...env, NODE_ENV: 'production', APP_URL: 'https://santa.example', WISHLIST_DB_PATH: ':memory:' }), /persistent/);
+  assert.equal(loadConfig({ ...env, WISHLIST_DB_PATH: '', RAILWAY_VOLUME_MOUNT_PATH: './mounted-volume' }).wishlistDbPath, path.resolve('./mounted-volume/wishes.sqlite'));
 });
 
 test('participant parsing handles lines, commas, Unicode, and rejects ambiguity', () => {
@@ -78,11 +86,16 @@ test('tokens enforce expiration, issuance time and maximum lifetime', () => {
 
 async function fixture(t, overrides = {}) {
   const config = { ...loadConfig({ ...env, ...overrides }) };
-  const server = createApp(config).listen(0, '127.0.0.1');
+  const wishStore = createWishStore(':memory:', config.sessionSecret);
+  const app = createApp(config, { wishStore });
+  const server = app.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const address = `http://127.0.0.1:${server.address().port}`;
   if (!config.production) config.origin = address;
-  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+  t.after(() => new Promise(resolve => {
+    server.close(() => { app.locals.closeDatabase(); resolve(); });
+    server.closeAllConnections();
+  }));
   function client(initialCookies = new Map()) {
     const cookies = new Map(initialCookies);
     async function request(path, fields, headers = {}) {
@@ -270,4 +283,111 @@ test('oversized bodies are rejected and missing pages have safe error views', as
   for (const file of ['/assets/app.js', '/assets/styles.css', '/assets/favicon.svg']) {
     assert.equal((await browser.request(file)).status, 200);
   }
+});
+
+test('wish storage survives reopening, separates draws, and keeps names and text encrypted', async t => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'santa-wishes-'));
+  const filename = path.join(directory, 'wishes.sqlite');
+  let store = createWishStore(filename, env.SESSION_SECRET);
+  t.after(async () => {
+    store.close();
+    const relative = path.relative(tmpdir(), directory);
+    assert.ok(relative.startsWith('santa-wishes-') && !relative.includes(path.sep));
+    await rm(directory, { recursive: true, force: true });
+  });
+  const text = 'Café de Costa Rica\nLibros y chocolates.';
+  store.set('draw-a', 'Alejandra', text);
+  store.set('draw-b', 'Alejandra', 'Otra idea para otro intercambio');
+  store.close();
+  const contents = await readFile(filename);
+  assert.equal(contents.includes(Buffer.from(text)), false);
+  assert.equal(contents.includes(Buffer.from('Alejandra')), false);
+  store = createWishStore(filename, env.SESSION_SECRET);
+  assert.equal(store.get('draw-a', 'Alejandra').text, text);
+  assert.equal(store.get('draw-b', 'Alejandra').text, 'Otra idea para otro intercambio');
+  store.set('draw-a', 'Alejandra', 'Té en vez de café');
+  assert.equal(store.get('draw-a', 'Alejandra').text, 'Té en vez de café');
+  store.set('draw-a', 'Alejandra', '  \n  ');
+  assert.equal(store.get('draw-a', 'Alejandra').text, '');
+  assert.equal(store.get('draw-b', 'Alejandra').text, 'Otra idea para otro intercambio');
+});
+
+test('wish storage supports full-length Unicode text and expires after 60 days', () => {
+  let now = 10000000;
+  const store = createWishStore(':memory:', env.SESSION_SECRET, { now: () => now });
+  try {
+    const text = '贈'.repeat(MAX_WISH_LENGTH);
+    store.set('draw', 'Alice', text);
+    assert.equal(store.get('draw', 'Alice').text, text);
+    assert.throws(() => store.set('draw', 'Alice', `${text}x`), /2000/);
+    assert.throws(() => store.set('draw', 'Alice', 'bad\u0000text'), /control/);
+    now += ASSIGNMENT_TTL - 1;
+    assert.equal(store.get('draw', 'Alice').text, text);
+    now++;
+    assert.equal(store.get('draw', 'Alice').text, '');
+  } finally { store.close(); }
+});
+
+async function openInvitation(browser, f, giver, recipient, drawId = 'wishlist-draw') {
+  const home = await browser.request('/');
+  const token = f.tokens.seal('invitation', { giver, recipient, drawId }, ASSIGNMENT_TTL);
+  assert.equal((await browser.request('/reveal', { _csrf: home.csrf, token })).status, 303);
+  return browser.request('/reveal');
+}
+
+test('saved wishes reach the gift buyer and only the authenticated owner can change them', async t => {
+  const f = await fixture(t);
+  const alice = f.client();
+  const bob = f.client();
+  const guest = f.client();
+  const alicePage = await openInvitation(alice, f, 'Alice', 'Bob');
+  const bobPage = await openInvitation(bob, f, 'Bob', 'Alice');
+  assert.equal((await guest.request('/wishes/recipient')).status, 401);
+  assert.equal((await guest.request('/wishes', { wishes: 'Uninvited' })).status, 303);
+  assert.equal((await bob.request('/wishes', { wishes: 'No CSRF token' })).status, 403);
+  assert.equal((await bob.request('/wishes', { _csrf: bobPage.csrf, wishes: 'Cross-site attempt' }, { Origin: 'https://evil.example' })).status, 403);
+  const bobWishes = 'Me gusta el café.\nTambién quiero libros.';
+  const saved = await bob.request('/wishes', { _csrf: bobPage.csrf, wishes: bobWishes });
+  assert.equal(saved.status, 303);
+  assert.equal(saved.headers.get('location'), '/reveal?saved=1#wishes-editor');
+  assert.match((await bob.request('/reveal?saved=1')).text, /Tus deseos quedaron guardados/u);
+  const visible = await alice.request('/wishes/recipient');
+  assert.equal(visible.status, 200);
+  assert.equal(visible.headers.get('cache-control'), 'no-store');
+  assert.equal(JSON.parse(visible.text).text, bobWishes);
+  assert.match((await alice.request('/reveal')).text, /Me gusta el café\./u);
+  // Extra name/recipient fields cannot target someone else's entry.
+  assert.equal((await alice.request('/wishes', { _csrf: alicePage.csrf, wishes: 'Mis propios deseos', giver: 'Bob' })).status, 303);
+  assert.equal(JSON.parse((await bob.request('/wishes/recipient')).text).text, 'Mis propios deseos');
+  assert.equal(JSON.parse((await alice.request('/wishes/recipient')).text).text, bobWishes);
+  const otherDraw = f.client();
+  await openInvitation(otherDraw, f, 'Alice', 'Bob', 'another-draw');
+  assert.equal(JSON.parse((await otherDraw.request('/wishes/recipient')).text).text, '');
+  // Editing or clearing keeps the original assignment and invitation intact.
+  await bob.request('/wishes', { _csrf: bobPage.csrf, wishes: 'Ahora prefiero té.' });
+  assert.equal(JSON.parse((await alice.request('/wishes/recipient')).text).text, 'Ahora prefiero té.');
+  await bob.request('/wishes', { _csrf: bobPage.csrf, wishes: '' });
+  assert.equal(JSON.parse((await alice.request('/wishes/recipient')).text).text, '');
+  assert.match((await bob.request('/reveal')).text, /class="recipient">Alice</u);
+});
+
+test('wishes remain plain text and invalid edits preserve the last saved version', async t => {
+  const f = await fixture(t);
+  const alice = f.client();
+  const bob = f.client();
+  await openInvitation(alice, f, 'Alice', 'Bob');
+  const bobPage = await openInvitation(bob, f, 'Bob', 'Alice');
+  const text = '<script>alert(1)</script>\n</textarea><img src=x onerror=alert(1)>';
+  await bob.request('/wishes', { _csrf: bobPage.csrf, wishes: text });
+  const buyerView = await alice.request('/reveal');
+  assert.match(buyerView.text, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/u);
+  assert.doesNotMatch(buyerView.text, /<script>alert|<img src=x/u);
+  const editor = await bob.request('/reveal');
+  assert.doesNotMatch(editor.text, /<img src=x/u);
+  assert.equal(JSON.parse((await alice.request('/wishes/recipient')).text).text, text);
+  const invalid = await bob.request('/wishes', { _csrf: bobPage.csrf, wishes: 'x'.repeat(MAX_WISH_LENGTH + 1) });
+  assert.equal(invalid.status, 400);
+  assert.match(invalid.text, /Puedes escribir hasta 2000 caracteres/u);
+  assert.equal(JSON.parse((await alice.request('/wishes/recipient')).text).text, text);
+  assert.equal((await bob.request('/wishes', { _csrf: bobPage.csrf })).status, 400);
 });

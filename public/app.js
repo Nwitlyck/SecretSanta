@@ -71,6 +71,53 @@ if (participants) {
   updateCount();
 }
 
+const wishesInput = document.getElementById('wishes');
+if (wishesInput) {
+  const updateWishCount = () => {
+    document.getElementById('wish-count').textContent = `${wishesInput.value.length} / ${wishesInput.maxLength}`;
+  };
+  wishesInput.addEventListener('input', updateWishCount);
+  updateWishCount();
+}
+
+const recipientWishes = document.getElementById('recipient-wishes');
+if (recipientWishes) {
+  const text = document.getElementById('recipient-wishes-text');
+  const empty = document.getElementById('recipient-wishes-empty');
+  const status = document.getElementById('wishlist-sync-status');
+  document.getElementById('wishlist-live-note').hidden = false;
+  let refreshing = false;
+  async function refreshWishes() {
+    if (document.visibilityState === 'hidden' || refreshing) return;
+    refreshing = true;
+    try {
+      const response = await fetch('/wishes/recipient', {
+        credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(10000),
+      });
+      if (response.status === 401) {
+        status.textContent = 'Abre tu invitación de nuevo para seguir viendo los deseos.';
+        return;
+      }
+      if (!response.ok) throw new Error('Wish refresh failed.');
+      const data = await response.json();
+      if (typeof data.text !== 'string') throw new Error('Invalid wish response.');
+      // Gift ideas are always plain text, including anything resembling HTML.
+      if (text.textContent !== data.text) text.textContent = data.text;
+      text.hidden = !data.text;
+      empty.hidden = Boolean(data.text);
+      status.textContent = 'Los deseos se actualizan automáticamente mientras estás aquí.';
+    } catch {
+      status.textContent = 'No pudimos actualizar los deseos. Volveremos a intentarlo en unos momentos.';
+    } finally {
+      refreshing = false;
+    }
+  }
+  setInterval(refreshWishes, 30000);
+  document.addEventListener('visibilitychange', refreshWishes);
+  window.addEventListener('focus', refreshWishes);
+}
+
 document.querySelectorAll('form').forEach(form => {
   form.addEventListener('submit', () => {
     const button = form.querySelector('button[type="submit"]');

@@ -7,3 +7,7 @@ coverage/
 *.log
 secret-santa-links-*.json
 .codex/
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

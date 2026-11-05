@@ -3,7 +3,7 @@ import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from 'node:cr
 export const DAY = 24 * 60 * 60;
 export const ASSIGNMENT_TTL = 60 * DAY;
 export const ADMIN_TTL = 8 * 60 * 60;
-const PURPOSES = new Set(['invitation', 'assignment', 'admin']);
+const PURPOSES = new Set(['invitation', 'assignment', 'admin', 'wishlist']);
 
 export function createTokenService(secret, now = () => Math.floor(Date.now() / 1000)) {
   const keys = new Map([...PURPOSES].map(purpose => [purpose,
@@ -25,7 +25,8 @@ export function createTokenService(secret, now = () => Math.floor(Date.now() / 1
 
   function open(purpose, token) {
     try {
-      if (!keys.has(purpose) || typeof token !== 'string' || token.length > 3500 || !/^v1\.[A-Za-z0-9_-]+$/u.test(token)) return null;
+      const maxLength = purpose === 'wishlist' ? 20000 : 3500;
+      if (!keys.has(purpose) || typeof token !== 'string' || token.length > maxLength || !/^v1\.[A-Za-z0-9_-]+$/u.test(token)) return null;
       const encoded = token.slice(3);
       const bytes = Buffer.from(encoded, 'base64url');
       if (bytes.length < 29 || bytes.toString('base64url') !== encoded) return null;

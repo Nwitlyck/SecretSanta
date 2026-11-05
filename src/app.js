@@ -7,13 +7,16 @@ import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import { createAssignments, parseParticipants } from './matching.js';
 import { ADMIN_TTL, ASSIGNMENT_TTL, createTokenService } from './tokens.js';
+import { createWishStore, MAX_WISH_LENGTH, normalizeWishes } from './wishes.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const digest = value => createHash('sha256').update(value).digest();
 const equal = (a, b) => typeof a === 'string' && typeof b === 'string' && timingSafeEqual(digest(a), digest(b));
 
-export function createApp(config) {
+export function createApp(config, { wishStore } = {}) {
   const app = express();
+  const wishes = wishStore ?? createWishStore(config.wishlistDbPath, config.sessionSecret);
+  app.locals.closeDatabase = () => wishes.close();
   const tokens = createTokenService(config.sessionSecret);
   const names = Object.fromEntries(['admin', 'assignment', 'csrf'].map(name => [name, `${config.production ? '__Host-' : ''}santa_${name}`]));
   const cookieOptions = {
@@ -106,13 +109,34 @@ export function createApp(config) {
     return data && typeof data.giver === 'string' && typeof data.recipient === 'string' &&
       typeof data.drawId === 'string' && data.giver !== data.recipient;
   }
+  function renderReveal(req, res, assignment, options = {}) {
+    const ownWishes = wishes.get(assignment.drawId, assignment.giver);
+    return res.render('reveal', {
+      page: 'reveal', assignment, error: null,
+      myWishes: ownWishes.text,
+      recipientWishes: wishes.get(assignment.drawId, assignment.recipient),
+      maxWishLength: MAX_WISH_LENGTH,
+      wishesError: null,
+      wishesSaved: req.query.saved === '1',
+      ...options,
+    });
+  }
+  const requireParticipant = (req, res, next) => {
+    const assignment = tokens.open('assignment', req.signedCookies[names.assignment]);
+    if (!validAssignment(assignment)) {
+      if (req.path === '/wishes/recipient') return res.status(401).json({ error: 'Abre tu invitación de nuevo para ver los deseos.' });
+      return res.redirect(303, '/reveal');
+    }
+    req.assignment = assignment;
+    next();
+  };
   function showPortal(req, res) {
     const assignment = tokens.open('assignment', req.signedCookies[names.assignment]);
     if (validAssignment(assignment)) {
       // A fresh 60-day window on every visit; no dependency on the invitation expiry.
       const value = { giver: assignment.giver, recipient: assignment.recipient, drawId: assignment.drawId };
       setCookie(res, 'assignment', tokens.seal('assignment', value, ASSIGNMENT_TTL), ASSIGNMENT_TTL);
-      return res.render('reveal', { page: 'reveal', assignment, error: null });
+      return renderReveal(req, res, assignment);
     }
     if (req.cookies[names.assignment] || req.signedCookies[names.assignment] !== undefined) clearCookie(res, 'assignment');
     return res.render('landing', { error: null, page: 'home' });
@@ -136,6 +160,22 @@ export function createApp(config) {
   app.post('/forget', csrfProtection, (_req, res) => {
     clearCookie(res, 'assignment');
     res.redirect(303, '/');
+  });
+  app.post('/wishes', requireParticipant, csrfProtection, (req, res) => {
+    let text;
+    try { text = normalizeWishes(req.body.wishes); }
+    catch (error) {
+      return renderReveal(req, res.status(400), req.assignment, {
+        myWishes: typeof req.body.wishes === 'string' ? req.body.wishes : '',
+        wishesError: error.message, wishesSaved: false,
+      });
+    }
+    // Identity comes exclusively from the encrypted cookie, never a form field.
+    wishes.set(req.assignment.drawId, req.assignment.giver, text);
+    return res.redirect(303, '/reveal?saved=1#wishes-editor');
+  });
+  app.get('/wishes/recipient', requireParticipant, (req, res) => {
+    res.json(wishes.get(req.assignment.drawId, req.assignment.recipient));
   });
   app.get('/admin', (req, res) => {
     const session = tokens.open('admin', req.signedCookies[names.admin]);
