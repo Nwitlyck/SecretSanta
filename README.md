@@ -1,103 +1,91 @@
 # Secret Santa
 
-A Node.js 24 / Express application with an organizer portal, private invitations, a 60-day remembered assignment, and editable plain-text gift wishes. Assignments and sessions remain in encrypted links and cookies. Shared wishes use a small SQLite file through Node's built-in `node:sqlite` module; no separate database server or additional npm dependency is required. EJS views and local CSS/JavaScript are included, with no frontend build step.
+A Node.js 24 / Express app backed by SQLite. Participants, assignments, invitation links, gift wishes, and login sessions are saved in one database. Restarting the server or refreshing the dashboard keeps the same exchange.
 
-The participant experience is in Spanish, including invitations, assignment reveals, gift wishes, shared-device controls, and error messages. The organizer portal remains in English.
+Participant pages are in Spanish. The organizer dashboard is in English. The Santa video plays for two seconds when a page opens.
 
 ## Run locally
 
-1. Install [Node.js 24 LTS](https://nodejs.org/) and open a terminal in this directory.
-2. Install dependencies and copy the environment template:
+1. Install Node.js 24 and run `npm ci` in this directory.
+2. Edit the existing `.env` file in the project root directly. The app loads it automatically. Keep this file local; it is ignored by Git.
+3. Set the following values in `.env`:
 
-   ```sh
-   npm ci
-   cp .env.example .env
+   ```dotenv
+   NODE_ENV=development
+   PORT=3000
+   ADMIN_PASSWORD=<a-unique-password-of-at-least-16-characters>
+   SESSION_SECRET=<a-random-secret-of-at-least-32-bytes>
+   APP_URL=http://localhost:3000
    ```
 
-   In PowerShell use `Copy-Item .env.example .env` for the second command.
-
-3. Generate a secret:
+   Generate a secret with:
 
    ```sh
    node -e "console.log(require('node:crypto').randomBytes(48).toString('base64url'))"
    ```
 
-   Put its output in `SESSION_SECRET` in `.env`. Set `ADMIN_PASSWORD` to a different, unique password with at least 16 characters. Do not commit `.env`.
+4. Run `npm start`, or `npm run dev` for automatic restarts.
+5. Open `http://localhost:3000/admin`, sign in, enter the names, and generate an exchange.
 
-4. Run `npm start` (or `npm run dev` for automatic restarts). Open `http://localhost:3000`, then `/admin` to organize a draw. The app creates `data/wishes.sqlite` locally; database files are gitignored.
-5. Run `npm test` for the matching, cryptography, authentication, CSRF, persistence, wish-sharing, and HTTP integration checks. Tests use isolated temporary databases.
+The app creates `data/wishes.sqlite` automatically. The filename is retained from the previous version so an existing wishes database can be upgraded in place. The file now stores the whole application. Database files and `.env` are gitignored.
 
-## Environment variables
+## Using the app
+
+- **Generate assignments** saves a complete draw in a single database transaction. Everyone gives and receives exactly once, with no self matches. Matching uses cryptographically random Fisher–Yates shuffles and rejects self matches.
+- The admin dashboard lists **Saved exchanges**. Reopen any exchange to retrieve its participant list and the same shared link. Refreshing the page never generates a new draw. Generating another exchange keeps previous ones available.
+- **Copy exchange link** gives you one link for the whole group. Share that same link with everyone. Opening it shows **¿Quién eres?**; each person selects their name and chooses **Ver mi intercambio** to see their saved assignment and edit their own wishes. Selecting a name never reshuffles the exchange.
+- Each shared link contains a random, unguessable credential and expires after 60 days. The credential stays in the URL fragment, is submitted in a CSRF-protected POST, and is removed from the address bar. Without JavaScript, paste the complete shared link into the landing-page form to open the name picker.
+- Choosing a name creates a saved participant session. The signed, HttpOnly cookie contains only a random session ID. Returning to `/` or `/reveal` remembers that selection for 60 days after the latest visit. Reopen the shared link or use **Volver a la lista** to choose a different name. Switching names revokes the browser's previous session and rotates its form token.
+- **Qué me gustaría recibir** lets each participant save and edit up to 2,000 characters of plain text. The person buying their gift sees those wishes. Updates appear on every visit, every 30 seconds while the page is visible, and when returning to the tab. With JavaScript disabled, reloading shows the latest wishes.
+- Emptying the wishes box and saving clears it. Wishes otherwise remain saved with the exchange. The latest save wins when editing from multiple devices.
+- **Borrar mi asignación de este dispositivo** signs the participant out and revokes that browser session. The original invitation still works until it expires. Wishes remain saved. Use separate browser profiles for people sharing a device.
+- Admin sign-out also deletes the corresponding session from SQLite. Admin sessions expire after eight hours; changing the admin password invalidates them.
+
+## Configuration
 
 | Variable | Purpose |
 | --- | --- |
-| `PORT` | Listening port; defaults to `3000`. Railway injects this. |
-| `ADMIN_PASSWORD` | Required. Unique organizer password, at least 16 characters. |
-| `SESSION_SECRET` | Required. At least 32 bytes of randomly generated secret material; use the command above. Keep it stable across deploys: it also encrypts stored wishes. |
-| `PARTICIPANTS` | Optional comma-separated default list, e.g. `Alice,Bob,Charlie,Dave`. These names appear only after admin authentication. |
-| `NODE_ENV` | Set to `production` on Railway to enable HTTPS enforcement, HSTS, and `__Host-` cookie names. Use `development` for local HTTP. |
-| `APP_URL` | Canonical public origin, e.g. `https://santa.example.com`. No path or credentials. Defaults locally to `http://localhost:PORT`. In production, required unless `RAILWAY_PUBLIC_DOMAIN` is available. |
-| `TRUST_PROXY` | Number of trusted proxy hops; defaults to `1` in production and `0` locally. Railway’s HTTPS proxy requires this to recognize HTTPS. Review this setting if you add another proxy or change hosts. |
-| `WISHLIST_DB_PATH` | Optional SQLite file location. Defaults locally to `./data/wishes.sqlite`, or to `wishes.sqlite` inside Railway's attached volume. If set on Railway, use `/data/wishes.sqlite` with a volume mounted at `/data`. |
-| `RAILWAY_VOLUME_MOUNT_PATH` | Automatically provided by Railway when a volume is attached. The app uses it to locate the wishes database. Do not set this manually. |
+| `PORT` | Defaults to `3000`; Railway supplies its assigned port. |
+| `ADMIN_PASSWORD` | Required organizer password, at least 16 characters. |
+| `SESSION_SECRET` | Required random secret of at least 32 bytes, used for cookie signatures. Keep the previous value during an upgrade to migrate old links and encrypted wishes. |
+| `PARTICIPANTS` | Optional initial names, separated by commas. Once a draw is saved, its participant list comes from SQLite. |
+| `DATABASE_PATH` | Optional SQLite file path. Relative paths resolve from the project root. Defaults to `./data/wishes.sqlite` locally, or `wishes.sqlite` inside Railway's attached volume. |
+| `WISHLIST_DB_PATH` | Previous name for `DATABASE_PATH`; still accepted so existing configuration works. `DATABASE_PATH` takes precedence. |
+| `NODE_ENV` | Use `development` for local HTTP and `production` for Railway HTTPS. |
+| `APP_URL` | Exact public origin, without a path, e.g. `https://santa.example.com`. Defaults to local HTTP or Railway's provided public domain. Production requires HTTPS. |
+| `TRUST_PROXY` | Number of trusted reverse-proxy hops: defaults to zero locally and one in production. |
+| `RAILWAY_VOLUME_MOUNT_PATH` | Provided by Railway when a persistent volume is attached; used to locate the database automatically. |
 
-Use the exact `APP_URL` origin when visiting the app: forms reject mismatched origins. On Railway, omit the localhost `APP_URL` value from `.env.example`. If using a custom domain, set `APP_URL` explicitly to that HTTPS origin.
+Production requires an attached volume or an explicit persistent `DATABASE_PATH`. An in-memory production database is rejected. The app also rejects missing secrets, invalid origins, and inaccessible database files.
 
-The app fails on startup for missing secrets, an invalid preconfigured list, invalid ports, an unsafe production origin, or an inaccessible database file. Production also requires an attached volume or an explicit persistent `WISHLIST_DB_PATH`; an in-memory database is rejected. This prevents silently losing saved wishes on redeployment. It never creates a temporary fallback secret.
+## Railway
 
-## Deploy on Railway
+1. Deploy the repository as a Railway service. The included `railway.json` runs `npm start` and checks `/health`.
+2. Set `NODE_ENV=production`, `ADMIN_PASSWORD`, and `SESSION_SECRET` in the service's Variables. Let Railway supply `PORT`. Optional: set `PARTICIPANTS` for the initial roster.
+3. Attach a **persistent volume mounted at `/data`** to the app service. The app automatically uses `/data/wishes.sqlite`. If you set `DATABASE_PATH` explicitly, point it to a file on this volume. Setting a path alone does not create persistent storage.
+4. Generate a public domain or set `APP_URL` to your HTTPS domain. Remove any localhost `APP_URL` and local `TRUST_PROXY=0` values when copying local configuration to production.
+5. Redeploy. Keep the service at one instance and back up the database volume. [Railway volumes](https://docs.railway.com/volumes/reference) preserve files across deployments and do not support replicas.
 
-1. Push this source and `package-lock.json` to a GitHub repository, excluding `.env` and downloaded link bundles.
-2. Create a Railway project and select **Deploy from GitHub repo**, then select the repository. Railway installs dependencies; the included `railway.json` sets `npm start` and the `/health` deployment health check.
-3. In the service’s **Variables**, add:
+No separate database server or extra npm database package is needed. The app uses Node's built-in SQLite module. It binds to `0.0.0.0`, uses the assigned port, and closes the database on graceful shutdown.
 
-   ```dotenv
-   NODE_ENV=production
-   ADMIN_PASSWORD=<your-unique-long-password>
-   SESSION_SECRET=<your-generated-random-secret>
-   PARTICIPANTS=Alice,Bob,Charlie,Dave
-   TRUST_PROXY=1
-   ```
+## Upgrading an existing exchange
 
-   `PARTICIPANTS` is optional. Let Railway supply `PORT`.
+Keep the same `.env`, `SESSION_SECRET`, database file, and Railway volume. The upgrade adds tables to the existing database; it does not erase old wish records.
 
-4. **Attach a persistent volume to the app service, mounted at `/data`.** The app detects `RAILWAY_VOLUME_MOUNT_PATH` and creates `/data/wishes.sqlite` there. You can alternatively set `WISHLIST_DB_PATH=/data/wishes.sqlite` explicitly, but that setting does not create a volume: the volume must still be attached. Keep this service at one instance; Railway services with volumes do not support replicas. Do not put the file on the ephemeral deployment filesystem.
-5. Generate a public domain under **Settings → Networking**. Railway supplies `RAILWAY_PUBLIC_DOMAIN`, which the app uses as its HTTPS origin. Alternatively set `APP_URL=https://your-public-domain` explicitly. Apply changes/redeploy after setting variables, attaching the volume, or generating the domain. A deployment before a public origin or persistent storage exists will fail safely until configured.
-6. Visit the HTTPS domain, open `/admin`, sign in, generate the draw, **save the link bundle**, and privately share each person’s own link. A separate PostgreSQL/Redis service is not needed.
+Previously issued encrypted invitation links and remembered cookies remain usable until their original expiry. As someone returns, the app imports their original assignment and any available saved wishes into SQLite. The old server did not keep the complete draw, so an imported exchange fills in as each participant opens their invitation. The admin dashboard labels these exchanges as imported. A newly generated exchange is saved completely from the start.
 
-For an existing deployment, attach the `/data` volume and redeploy this version with the same `SESSION_SECRET`. Existing invitation links and cookies remain valid; participants do not need new links to use gift wishes. Back up the volume through Railway if you want recovery from accidental data loss. [Railway's volume documentation](https://docs.railway.com/volumes/reference) explains persistence, backups, and the single-instance limitation.
+Existing SQLite exchanges automatically receive one shared group link without changing their pairings or wishes. Previously issued individual links still work, while the dashboard now shows only the shared link. In partially imported exchanges, names with an unknown original assignment are marked **pendiente** until that participant opens their original invitation.
 
-The server binds to `0.0.0.0` and the assigned `PORT`. `/health` deliberately accepts Railway’s internal HTTP probe. All other production pages require HTTPS. Graceful shutdown handles Railway’s `SIGTERM`.
+Before an old participant returns, their original link is still the way to recover their assignment. Keep the old link bundle until everyone has migrated. Older encrypted wishes must still be within their original 60-day lifetime to be imported.
 
-Railway documents its [Express deployment flow](https://railway.com/guides/express), [provided variables](https://docs.railway.com/variables/reference), and [deployment health checks](https://docs.railway.com/deployments/healthchecks).
+## Security and verification
 
-## How to use it
+SQLite is the source of truth. Names, pairings, and new wishes use ordinary database columns; protect the database file and its backups. Login session IDs are stored as hashes, cookies are signed, and the admin password is read from the environment rather than saved in SQLite.
 
-- `/admin`: sign in with `ADMIN_PASSWORD`. Edit the default list or enter 2–100 unique names, separated by commas or newlines. Duplicate names are rejected ignoring case and Unicode compatibility differences; add initials to distinguish people.
-- **Generate assignments**: each person gives to exactly one other person and receives exactly one gift. Matching uses cryptographically random Fisher–Yates shuffles and rejects any shuffle with a self match. This samples uniformly from all valid derangements, including mutual pairs.
-- Save the JSON link bundle or copy the links before navigating away. The bundle contains participant names, encrypted invitation links, a draw ID, and the invitation expiry. Keep it private. It is downloaded to the admin’s device, never stored on the server. Open the JSON with a text editor to recover its original links; the app has no bundle-import feature.
-- Give each participant only their own link. Opening it automatically reveals the match and redirects to `/reveal`. Without JavaScript, paste the complete invitation link or token into the landing form and submit it.
-- Returning to `/` or `/reveal` shows the same match for 60 days after the latest successful visit in that browser. A late redemption still gets a fresh full 60-day cookie lifetime. A new personal invitation replaces that browser’s remembered match; use separate browser profiles for people sharing a device.
-- **Qué me gustaría recibir**: participants write up to 2,000 characters of plain text and select **Guardar mis deseos**. They can edit and save again using the same invitation or remembered browser session. Emptying the text and saving deletes their wishes. Line breaks are preserved; HTML and Markdown are displayed as text, with no rich-text editor.
-- **Lo que le gustaría a…** shows the recipient's latest saved wishes. It updates on every page visit and automatically every 30 seconds while the page is visible, plus when returning to the tab. This never reveals who is buying the participant's gift. With JavaScript disabled, saved wishes still appear when the buyer reloads the page.
-- Wishes are kept for 60 days after the last save and are separated by draw. The last save wins if a participant edits from multiple devices. Only the person identified by the encrypted assignment cookie can update their own wishes; form fields cannot select another owner.
-- **Forget my assignment on this device** removes the browser cookie. The original invitation remains usable until its expiry. This does not delete shared wishes; clear and save the text first if you want those removed. Organizers sign out using the dashboard’s sign-out button.
+The shared link grants access to the group. Choosing a name is not identity verification: anyone with that link can choose any participant's name, view that assignment, and edit that name's wishes. Share it only with your trusted group. The name picker itself lists names without showing pairings or wishes.
 
-## Security and storage
+Prepared SQL statements, database constraints, and transactions protect data integrity. Session checks tie the editor to the selected name and show that name's assigned recipient's wishes. Changing the owner through a wish form field is not allowed. Forms use signed CSRF tokens and origin checks. EJS escapes names and wishes, live updates use `textContent`, Helmet applies a restrictive Content Security Policy, and private responses are not cached. Production cookies require HTTPS.
 
-The app is now stateful **only for gift wishes**. SQLite stores a keyed, unguessable identifier, an encrypted wish payload, and its expiry. It does not store participant names, assignments, admin sessions, or generated link bundles. Assignment and session verification remains stateless. Wishes use prepared SQL statements and are encrypted with a separate AES-256-GCM key derived from `SESSION_SECRET`. Expired wishes are never returned; expired records are pruned on startup and subsequent saves.
+There is no built-in login rate limiter. Use a strong password and configure rate limiting for `POST /admin/login` at your trusted edge if exposing it publicly.
 
-- Invitations and remembered assignments use AES-256-GCM authenticated encryption with random 96-bit IVs. HKDF derives separate keys for invitations, assignment cookies, admin sessions, cookie signing, wish encryption, and wish lookup identifiers. The implementation uses [Node’s built-in crypto API](https://nodejs.org/api/crypto.html).
-- Invitation links expire 60 days after generation. The secret is in a URL fragment (`/reveal#token=...`), which browsers do not transmit in HTTP URLs. Local JavaScript removes it from the address bar and submits it in a CSRF-protected POST. Do not configure application monitoring or proxies to record request bodies or cookies.
-- Assignment cookies are encrypted **and** signed using `cookie-parser`. They are `HttpOnly`, `SameSite=Lax`, host-only, and `Secure` in production, with a 60-day `Max-Age` and a matching encrypted expiry. Production uses the `__Host-` prefix and `Path=/`. Admin cookies expire after 8 hours, and changing the password also invalidates existing admin sessions.
-- Forms, including wish updates, use signed, random double-submit CSRF tokens, origin validation, and Fetch Metadata checks. EJS escapes participant names and wish text; live updates use `textContent`. Helmet sets a restrictive Content Security Policy with local assets only, blocks framing, and disables referrers. Responses, including the private wish API, have `Cache-Control: no-store`, and sensitive values are not logged. This follows [Express security guidance](https://expressjs.com/advanced/best-practice-security/).
-- Password verification compares fixed-length digests with `timingSafeEqual`. A constant 600 ms delay slows individual login attempts. There is no in-process login rate limiter or durable rate-limit counter. For an internet-facing admin portal, configure rate limiting for `POST /admin/login` at a trusted edge/WAF, or place `/admin` behind a private access gateway. The delay alone does not stop parallel or distributed guessing; use a high-entropy password.
-
-Keeping assignments stateless has a few practical consequences:
-
-- A generated draw cannot be recovered from the server after navigation or redeployment. Refreshing the results page may prompt the browser to resubmit the generation form, creating a different draw. The environment roster can prefill names again; it cannot reproduce a past random draw. Save the original links before leaving or refreshing the page.
-- Generating a new draw does **not** revoke previous invitations or remembered matches. There is no central “current draw,” one-time-use tracking, or per-link revocation. To invalidate all issued tokens and cookies, rotate `SESSION_SECRET`; then generate and distribute a new draw. Rotation also makes previously saved wishes inaccessible because their lookup and encryption keys change. Keep the original secret for as long as old links, matches, and saved wishes should keep working.
-- Links are bearer credentials. Anyone holding a participant’s link can see that assignment, including an organizer with the bundle. Encryption hides contents from casual inspection; it cannot identify who is opening a forwarded link.
-- Cookie retention depends on the browser: clearing cookies, private browsing, browser policies, or switching domains/devices can remove access before 60 days. Keep the original invitation as a backup. The server cannot enforce a browser’s storage retention.
-
-There are no third-party analytics, CDN scripts, remote fonts, or externally hosted frontend assets.
+Run `npm test` for matching, database restart persistence, saved exchange recovery, session expiry/revocation, authorization, plain-text safety, and migration checks. Tests use isolated databases, not your real `.env` or application data.

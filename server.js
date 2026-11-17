@@ -1,6 +1,10 @@
-import 'dotenv/config';
+import dotenv from 'dotenv';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createApp } from './src/app.js';
 import { loadConfig } from './src/config.js';
+
+dotenv.config({ path: path.join(path.dirname(fileURLToPath(import.meta.url)), '.env'), quiet: true });
 
 try {
   const config = loadConfig();

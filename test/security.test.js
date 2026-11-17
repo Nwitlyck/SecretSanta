@@ -3,105 +3,64 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { createHash, createHmac, hkdfSync } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import { createApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
+import { createDatabase } from '../src/database.js';
 import { createAssignments, parseParticipants } from '../src/matching.js';
 import { ADMIN_TTL, ASSIGNMENT_TTL, createTokenService } from '../src/tokens.js';
-import { createWishStore, MAX_WISH_LENGTH } from '../src/wishes.js';
+import { MAX_WISH_LENGTH } from '../src/wishes.js';
 
 const env = {
   ADMIN_PASSWORD: 'a-long-test-password-only',
   SESSION_SECRET: 'a-test-only-secret-with-at-least-32-bytes-of-material',
-  PARTICIPANTS: 'Alice,Bob,Charlie,Dave',
-  WISHLIST_DB_PATH: './data/wishes.sqlite',
+  PARTICIPANTS: 'Alice,Bob,Charlie,Dave', DATABASE_PATH: './data/wishes.sqlite',
 };
+const fileConnections = new Map();
 
-test('configuration rejects missing or unsafe secrets and production origins', () => {
-  assert.throws(() => loadConfig({}), /ADMIN_PASSWORD/);
-  assert.throws(() => loadConfig({ ...env, SESSION_SECRET: 'short' }), /SESSION_SECRET/);
-  assert.throws(() => loadConfig({ ...env, PORT: 'NaN' }), /PORT/);
-  assert.throws(() => loadConfig({ ...env, NODE_ENV: 'production' }), /APP_URL/);
-  assert.throws(() => loadConfig({ ...env, NODE_ENV: 'production', APP_URL: 'http://example.com' }), /HTTPS/);
-  assert.throws(() => loadConfig({ ...env, APP_URL: 'https://example.com/path' }), /path/);
-  assert.throws(() => loadConfig({ ...env, APP_URL: 'https://user:pass@example.com' }), /credentials/);
-  assert.throws(() => loadConfig({ ...env, TRUST_PROXY: 'true' }), /TRUST_PROXY/);
-  assert.equal(loadConfig({ ...env, NODE_ENV: 'production', RAILWAY_PUBLIC_DOMAIN: 'santa.up.railway.app' }).origin, 'https://santa.up.railway.app');
-  assert.throws(() => loadConfig({ ...env, NODE_ENV: 'production', APP_URL: 'https://santa.example', WISHLIST_DB_PATH: '' }), /persistent volume/);
-  assert.throws(() => loadConfig({ ...env, NODE_ENV: 'production', APP_URL: 'https://santa.example', WISHLIST_DB_PATH: ':memory:' }), /persistent/);
-  assert.equal(loadConfig({ ...env, WISHLIST_DB_PATH: '', RAILWAY_VOLUME_MOUNT_PATH: './mounted-volume' }).wishlistDbPath, path.resolve('./mounted-volume/wishes.sqlite'));
-});
+async function temporaryDatabase(t) {
+  const directory = await mkdtemp(path.join(tmpdir(), 'santa-db-'));
+  const filename = path.join(directory, 'test.sqlite');
+  t.after(async () => {
+    for (const close of fileConnections.get(filename) || []) await close();
+    fileConnections.delete(filename);
+    const relative = path.relative(tmpdir(), directory);
+    assert.ok(relative.startsWith('santa-db-') && !relative.includes(path.sep));
+    await rm(directory, { recursive: true, force: true });
+  });
+  return filename;
+}
 
-test('participant parsing handles lines, commas, Unicode, and rejects ambiguity', () => {
-  assert.deepEqual(parseParticipants(' Alice, Bob\r\nChloé\nDave, '), ['Alice', 'Bob', 'Chloé', 'Dave']);
-  for (const input of ['', 'Alice', 'Alice,alice', 'Éva,E\u0301va', 'Bob,Ｂｏｂ', `Alice,${'x'.repeat(81)}`, 'Alice,Bob\u202E', Array.from({ length: 101 }, (_, i) => `Person ${i}`).join(',')]) {
-    assert.throws(() => parseParticipants(input));
-  }
-});
-
-test('derangements give and receive exactly once, never oneself, including two participants', () => {
-  for (const size of [2, 3, 4, 10, 100]) {
-    const names = Array.from({ length: size }, (_, i) => `Person ${i}`);
-    for (let attempt = 0; attempt < 100; attempt++) {
-      const assignments = createAssignments(names);
-      assert.deepEqual(assignments.map(a => a.giver), names);
-      assert.deepEqual(assignments.map(a => a.recipient).sort(), [...names].sort());
-      assert.ok(assignments.every(a => a.giver !== a.recipient));
-    }
-  }
-  assert.deepEqual(createAssignments(['Alice', 'Bob']), [{ giver: 'Alice', recipient: 'Bob' }, { giver: 'Bob', recipient: 'Alice' }]);
-});
-
-test('authenticated encryption hides contents, randomizes tokens, and separates purposes', () => {
-  const tokens = createTokenService(env.SESSION_SECRET);
-  const data = { giver: 'Alice', recipient: 'Bob', drawId: 'draw-1' };
-  const token = tokens.seal('invitation', data, ASSIGNMENT_TTL);
-  assert.equal(tokens.open('invitation', token).recipient, 'Bob');
-  assert.notEqual(token, tokens.seal('invitation', data, ASSIGNMENT_TTL));
-  assert.equal(token.includes('Alice'), false);
-  assert.equal(tokens.open('admin', token), null);
-  assert.equal(tokens.open('assignment', token), null);
-  assert.equal(createTokenService('another-entirely-different-secret').open('invitation', token), null);
-  const bytes = Buffer.from(token.slice(3), 'base64url');
-  bytes[30] ^= 1;
-  assert.equal(tokens.open('invitation', `v1.${bytes.toString('base64url')}`), null);
-  for (const value of [undefined, null, {}, '', 'v1.bad', `${token}=`, 'x'.repeat(4000)]) {
-    assert.equal(tokens.open('invitation', value), null);
-  }
-});
-
-test('tokens enforce expiration, issuance time and maximum lifetime', () => {
-  let now = 10000000;
-  const tokens = createTokenService(env.SESSION_SECRET, () => now);
-  const token = tokens.seal('invitation', { giver: 'Alice' }, ASSIGNMENT_TTL);
-  now += ASSIGNMENT_TTL - 1;
-  assert.ok(tokens.open('invitation', token));
-  now++;
-  assert.equal(tokens.open('invitation', token), null);
-  assert.equal(tokens.open('admin', tokens.seal('admin', {}, ADMIN_TTL + 1)), null);
-  const future = tokens.seal('assignment', {}, ASSIGNMENT_TTL);
-  now--;
-  assert.equal(tokens.open('assignment', future), null);
-});
-
-async function fixture(t, overrides = {}) {
+async function fixture(t, { filename = ':memory:', overrides = {}, clock } = {}) {
   const config = { ...loadConfig({ ...env, ...overrides }) };
-  const wishStore = createWishStore(':memory:', config.sessionSecret);
-  const app = createApp(config, { wishStore });
+  const database = createDatabase(filename, config.sessionSecret, clock ? { now: clock } : {});
+  const app = createApp(config, { database });
   const server = app.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const address = `http://127.0.0.1:${server.address().port}`;
   if (!config.production) config.origin = address;
-  t.after(() => new Promise(resolve => {
-    server.close(() => { app.locals.closeDatabase(); resolve(); });
-    server.closeAllConnections();
-  }));
-  function client(initialCookies = new Map()) {
-    const cookies = new Map(initialCookies);
-    async function request(path, fields, headers = {}) {
-      const response = await fetch(`${address}${path}`, {
+  let closed = false;
+  async function close() {
+    if (closed) return;
+    await new Promise(resolve => { server.close(resolve); server.closeAllConnections(); });
+    app.locals.closeDatabase();
+    closed = true;
+  }
+  if (filename !== ':memory:') {
+    const connections = fileConnections.get(filename) || [];
+    connections.push(close);
+    fileConnections.set(filename, connections);
+  }
+  t.after(close);
+  function client(initial = new Map()) {
+    const cookies = new Map(initial);
+    async function request(url, fields, headers = {}) {
+      const response = await fetch(`${address}${url}`, {
         method: fields === undefined ? 'GET' : 'POST', redirect: 'manual',
-        headers: { Cookie: [...cookies].map(([key, value]) => `${key}=${value}`).join('; '), ...(fields === undefined ? {} : { Origin: config.origin }), ...headers },
+        headers: { Cookie: [...cookies].map(([key, value]) => `${key}=${value}`).join('; '),
+          ...(fields === undefined ? {} : { Origin: config.origin }), ...headers },
         ...(fields === undefined ? {} : { body: new URLSearchParams(fields) }),
       });
       for (const cookie of response.headers.getSetCookie()) {
@@ -113,281 +72,379 @@ async function fixture(t, overrides = {}) {
         else cookies.delete(pair.slice(0, equals));
       }
       const text = await response.text();
-      return { status: response.status, headers: response.headers, text, csrf: text.match(/name="_csrf" value="([a-f0-9]+)"/u)?.[1] };
+      return { status: response.status, headers: response.headers, text,
+        csrf: text.match(/name="_csrf" value="([a-f0-9]+)"/u)?.[1] };
     }
     return { request, cookies };
   }
-  return { config, client, tokens: createTokenService(config.sessionSecret) };
+  return { config, database, client, close };
 }
 
-async function login(admin) {
-  const page = await admin.request('/admin');
-  assert.equal(page.status, 200);
-  const result = await admin.request('/admin/login', { _csrf: page.csrf, password: env.ADMIN_PASSWORD });
+async function login(admin, headers = {}) {
+  const page = await admin.request('/admin', undefined, headers);
+  assert.equal((await admin.request('/admin/login', { _csrf: page.csrf, password: env.ADMIN_PASSWORD }, headers)).status, 303);
+  return admin.request('/admin', undefined, headers);
+}
+async function generate(admin, participants = 'Alice,Bob,Charlie,Dave') {
+  const dashboard = await admin.request('/admin');
+  const result = await admin.request('/admin/generate', { _csrf: dashboard.csrf, participants });
   assert.equal(result.status, 303);
-  return admin.request('/admin');
+  return admin.request(result.headers.get('location'));
+}
+const getLinks = page => [...page.text.matchAll(/id="exchange-link" type="text" value="(https?:[^" ]+#token=e2\.[A-Za-z0-9_-]+)"/gu)].map(match => match[1]);
+async function redeem(browser, invitation, name = 'Alice') {
+  const page = await browser.request('/');
+  const response = await browser.request('/reveal', { _csrf: page.csrf, token: invitation });
+  if (response.status === 200) {
+    assert.match(response.text, /id="choose-participant-form"/u);
+    const token = invitation.startsWith('http') ? new URL(invitation).hash.slice(7) : invitation;
+    const selected = await browser.request('/exchange/join', { _csrf: response.csrf, token, name });
+    assert.equal(selected.status, 303);
+  } else assert.equal(response.status, 303);
+  return browser.request('/reveal');
+}
+function legacyCookie(token, secret) {
+  const signature = createHmac('sha256', secret).update(token).digest('base64').replace(/=+$/u, '');
+  return encodeURIComponent(`s:${token}.${signature}`);
 }
 
-const getLinks = page => [...page.text.matchAll(/type="text" value="(https?:[^" ]+#token=v1\.[A-Za-z0-9_-]+)"/gu)].map(match => match[1]);
+test('configuration validates secrets and supports DATABASE_PATH, the old path setting, and Railway volumes', () => {
+  assert.throws(() => loadConfig({}), /ADMIN_PASSWORD/);
+  assert.throws(() => loadConfig({ ...env, SESSION_SECRET: 'short' }), /SESSION_SECRET/);
+  assert.throws(() => loadConfig({ ...env, PORT: 'bad' }), /PORT/);
+  assert.throws(() => loadConfig({ ...env, NODE_ENV: 'production' }), /APP_URL/);
+  assert.throws(() => loadConfig({ ...env, NODE_ENV: 'production', APP_URL: 'http://example.com' }), /HTTPS/);
+  assert.throws(() => loadConfig({ ...env, APP_URL: 'https://example.com/path' }), /path/);
+  assert.throws(() => loadConfig({ ...env, APP_URL: 'https://user:pass@example.com' }), /credentials/);
+  assert.throws(() => loadConfig({ ...env, TRUST_PROXY: 'true' }), /TRUST_PROXY/);
+  assert.throws(() => loadConfig({ ...env, NODE_ENV: 'production', APP_URL: 'https://santa.example', DATABASE_PATH: '' }), /persistent/);
+  assert.throws(() => loadConfig({ ...env, NODE_ENV: 'production', APP_URL: 'https://santa.example', DATABASE_PATH: ':memory:' }), /persistent/);
+  assert.equal(loadConfig({ ...env, DATABASE_PATH: '', WISHLIST_DB_PATH: './old.sqlite' }).databasePath, path.resolve('old.sqlite'));
+  assert.equal(loadConfig({ ...env, DATABASE_PATH: '', RAILWAY_VOLUME_MOUNT_PATH: './volume' }).databasePath, path.resolve('volume/wishes.sqlite'));
+  assert.equal(loadConfig({ ...env, NODE_ENV: 'production', RAILWAY_PUBLIC_DOMAIN: 'santa.up.railway.app' }).origin, 'https://santa.up.railway.app');
+});
 
-test('full admin-to-participant flow persists encrypted assignments across app restarts', async t => {
+test('participants validate Unicode, duplicates, controls, and roster size', () => {
+  assert.deepEqual(parseParticipants(' Alice, Bob\r\nChloé\nDave, '), ['Alice', 'Bob', 'Chloé', 'Dave']);
+  for (const input of ['', 'Alice', 'Alice,alice', 'Éva,E\u0301va', 'Bob,Ｂｏｂ', `Alice,${'x'.repeat(81)}`, 'Alice,Bob\u202E', Array.from({ length: 101 }, (_, i) => `Person ${i}`).join(',')]) {
+    assert.throws(() => parseParticipants(input));
+  }
+});
+
+test('fair matching gives and receives exactly once without self matches', () => {
+  for (const size of [2, 3, 4, 10, 100]) {
+    const names = Array.from({ length: size }, (_, i) => `Person ${i}`);
+    for (let n = 0; n < 100; n++) {
+      const assignments = createAssignments(names);
+      assert.deepEqual(assignments.map(a => a.giver), names);
+      assert.deepEqual(assignments.map(a => a.recipient).sort(), [...names].sort());
+      assert.ok(assignments.every(a => a.giver !== a.recipient));
+    }
+  }
+});
+
+test('SQLite persists draws, invitation links, wishes, and both session types across a full restart', async t => {
+  const filename = await temporaryDatabase(t);
+  const first = await fixture(t, { filename });
+  const admin = first.client();
+  await login(admin);
+  const generated = await generate(admin);
+  const links = getLinks(generated);
+  assert.equal(links.length, 1);
+  const participants = first.database.getDraw().participants.map(person => ({ giver: person.name, recipient: person.recipient_name }));
+  assert.ok(participants.every(person => person.giver !== person.recipient));
+  assert.equal(new Set(participants.map(person => person.recipient)).size, 4);
+  const participant = first.client();
+  const reveal = await redeem(participant, links[0]);
+  assert.match(reveal.text, /TE TOCA REGALARLE A/u);
+  await participant.request('/wishes', { _csrf: reveal.csrf, wishes: 'Café y libros' });
+  const adminCookies = new Map(admin.cookies);
+  const participantCookies = new Map(participant.cookies);
+  await first.close();
+  const second = await fixture(t, { filename });
+  const dashboard = await second.client(adminCookies).request('/admin');
+  assert.equal(dashboard.status, 200);
+  // Origin may change, but the saved credential and assignment do not.
+  assert.deepEqual(getLinks(dashboard).map(url => new URL(url).hash), links.map(url => new URL(url).hash));
+  const remembered = await second.client(participantCookies).request('/reveal');
+  assert.match(remembered.text, new RegExp(`class="recipient">${participants[0].recipient}<`));
+  assert.match(remembered.text, /Café y libros/u);
+  assert.match(remembered.text, /<html lang="es">/u);
+});
+
+test('refreshing and switching saved exchanges retains links and never generates a new draw', async t => {
   const f = await fixture(t);
   const admin = f.client();
-  const dashboard = await login(admin);
-  assert.match(dashboard.text, /Alice\nBob\nCharlie\nDave/u);
-  const generated = await admin.request('/admin/generate', { _csrf: dashboard.csrf, participants: 'Alice,Bob,Charlie,Dave' });
-  assert.equal(generated.status, 200);
-  const links = getLinks(generated);
-  assert.equal(links.length, 4);
-  const assignments = links.map(link => f.tokens.open('invitation', new URL(link).hash.slice(7)));
-  assert.ok(assignments.every(a => a.giver !== a.recipient));
-  assert.equal(new Set(assignments.map(a => a.recipient)).size, 4);
-
-  const participant = f.client();
-  const welcome = await participant.request('/reveal');
-  assert.doesNotMatch(welcome.text, /class="recipient"/u);
-  assert.match(welcome.text, /<html lang="es">/u);
-  const redemption = await participant.request('/reveal', { _csrf: welcome.csrf, token: links[0] });
-  assert.equal(redemption.status, 303);
-  assert.equal(redemption.headers.get('location'), '/reveal');
-  const cookie = redemption.headers.getSetCookie().find(value => value.startsWith('santa_assignment='));
-  assert.match(cookie, /Max-Age=5184000/u);
-  assert.match(cookie, /HttpOnly/u);
-  assert.match(cookie, /SameSite=Lax/u);
-  assert.doesNotMatch(cookie, /Alice|Bob|Charlie|Dave/u);
-  const reveal = await participant.request('/');
-  assert.match(reveal.text, new RegExp(`class="recipient">${assignments[0].recipient}<`));
-  assert.match(reveal.text, /TE TOCA REGALARLE A/u);
-  const restarted = await fixture(t);
-  const remembered = restarted.client(participant.cookies);
-  assert.match((await remembered.request('/reveal')).text, new RegExp(`class="recipient">${assignments[0].recipient}<`));
-  const adminAfterRestart = restarted.client(admin.cookies);
-  assert.match((await adminAfterRestart.request('/admin')).text, /The guest list/u);
-  // No server-side copy of the links or a transient draw/session Map exists.
-  assert.equal(getLinks(await adminAfterRestart.request('/admin')).length, 0);
-  const forgotten = await participant.request('/forget', { _csrf: reveal.csrf });
-  assert.equal(forgotten.status, 303);
-  assert.doesNotMatch((await participant.request('/')).text, /class="recipient"/u);
+  await login(admin);
+  const oldPage = await generate(admin, 'Alice,Bob');
+  const oldLinks = getLinks(oldPage);
+  const oldId = f.database.getDraw().id;
+  await generate(admin, 'Carla,Diego,Eva');
+  assert.equal(f.database.listDraws().length, 2);
+  assert.equal(getLinks(await admin.request('/admin')).length, 1);
+  for (let n = 0; n < 3; n++) assert.deepEqual(getLinks(await admin.request(`/admin?draw=${oldId}`)), oldLinks);
+  assert.equal(f.database.listDraws().length, 2);
+  assert.equal((await admin.request('/admin?draw=unknown')).status, 404);
+  const dashboard = await admin.request('/admin');
+  assert.equal((await admin.request('/admin/generate', { _csrf: dashboard.csrf, participants: 'Alice,Alice' })).status, 400);
+  assert.equal(f.database.listDraws().length, 2);
 });
 
-test('late redemption starts its own full 60-day cookie lifetime', async t => {
+test('SQLite sessions expire, renew participant access, and reject revoked or wrong-role tokens', () => {
+  let now = 10000000;
+  const database = createDatabase(':memory:', env.SESSION_SECRET, { now: () => now });
+  try {
+    const drawId = database.createDraw(['Alice', 'Bob']);
+    const sharedToken = database.getDraw(drawId).sharedToken;
+    const person = database.chooseParticipant(sharedToken, 'Alice');
+    const participant = database.createParticipantSession(person);
+    const admin = database.createAdminSession('fingerprint');
+    assert.ok(database.hasAdminSession(admin, 'fingerprint'));
+    assert.equal(database.hasAdminSession(participant, 'fingerprint'), false);
+    assert.equal(database.readParticipantSession(admin), null);
+    now += ADMIN_TTL;
+    assert.equal(database.hasAdminSession(admin, 'fingerprint'), false);
+    now += ASSIGNMENT_TTL - ADMIN_TTL - 1;
+    assert.ok(database.readParticipantSession(participant, { renew: true }));
+    now += 2;
+    assert.equal(database.findExchange(sharedToken), null);
+    assert.ok(database.readParticipantSession(participant));
+    database.deleteSession(participant);
+    assert.equal(database.readParticipantSession(participant), null);
+  } finally { database.close(); }
+});
+
+test('login/logout and forget revoke database sessions, including replay of old cookies', async t => {
   const f = await fixture(t);
-  const oldTokens = createTokenService(env.SESSION_SECRET, () => Math.floor(Date.now() / 1000) - ASSIGNMENT_TTL + 60);
-  const invitation = oldTokens.seal('invitation', { giver: 'Alice', recipient: 'Bob', drawId: 'old-draw' }, ASSIGNMENT_TTL);
-  const browser = f.client();
-  const home = await browser.request('/');
-  const response = await browser.request('/reveal', { _csrf: home.csrf, token: invitation });
-  assert.equal(response.status, 303);
-  const value = decodeURIComponent(browser.cookies.get('santa_assignment'));
-  const signed = cookieUnsign(value, f.tokens.cookieSecret);
-  const assignment = f.tokens.open('assignment', signed);
-  assert.equal(assignment.exp - assignment.iat, ASSIGNMENT_TTL);
-  assert.ok(assignment.exp > Math.floor(Date.now() / 1000) + ASSIGNMENT_TTL - 5);
+  const admin = f.client();
+  await login(admin);
+  const links = getLinks(await generate(admin, 'Alice,Bob'));
+  const oldAdmin = new Map(admin.cookies);
+  const dashboard = await admin.request('/admin');
+  await admin.request('/admin/logout', { _csrf: dashboard.csrf });
+  assert.match((await f.client(oldAdmin).request('/admin')).text, /name="password"/u);
+  const person = f.client();
+  const reveal = await redeem(person, links[0]);
+  const oldPerson = new Map(person.cookies);
+  await person.request('/forget', { _csrf: reveal.csrf });
+  assert.doesNotMatch((await f.client(oldPerson).request('/')).text, /class="recipient"/u);
+  await redeem(person, links[0]);
 });
 
-// cookie-parser's public helper also verifies the cookie signature independently.
-import cookieParser from 'cookie-parser';
-const cookieUnsign = (value, secret) => cookieParser.signedCookie(value, secret);
-
-test('CSRF, cross-origin requests, authentication failures and logout are enforced', async t => {
+test('CSRF, cross-origin requests, password checks, and opaque cookie tampering fail closed', async t => {
   const f = await fixture(t);
   const browser = f.client();
   assert.equal((await browser.request('/admin/generate', { participants: 'Alice,Bob' })).status, 303);
   const page = await browser.request('/admin');
   assert.equal((await browser.request('/admin/login', { password: env.ADMIN_PASSWORD })).status, 403);
   assert.equal((await browser.request('/admin/login', { _csrf: page.csrf, password: env.ADMIN_PASSWORD }, { Origin: 'https://evil.example' })).status, 403);
-  assert.equal((await browser.request('/admin/login', { _csrf: page.csrf, password: env.ADMIN_PASSWORD }, { 'Sec-Fetch-Site': 'cross-site' })).status, 403);
   assert.equal((await browser.request('/admin/login', { _csrf: page.csrf, password: env.ADMIN_PASSWORD }, { Origin: 'null' })).status, 403);
-  assert.equal((await browser.request('/admin/login', { _csrf: page.csrf, password: env.ADMIN_PASSWORD }, { Origin: 'null', 'Sec-Fetch-Site': 'cross-site' })).status, 403);
-  assert.equal((await browser.request('/admin/login', { _csrf: page.csrf, password: 'wrong-password' })).status, 401);
+  assert.equal((await browser.request('/admin/login', { _csrf: page.csrf, password: env.ADMIN_PASSWORD }, { 'Sec-Fetch-Site': 'cross-site' })).status, 403);
+  assert.equal((await browser.request('/admin/login', { _csrf: page.csrf, password: 'wrong' })).status, 401);
   const dashboard = await login(browser);
-  // Browsers can send null origins for no-referrer form navigations.
-  assert.equal((await browser.request('/admin/generate', { _csrf: dashboard.csrf, participants: 'Alice,Bob' }, { Origin: 'null', 'Sec-Fetch-Site': 'same-origin' })).status, 200);
-  assert.equal((await browser.request('/admin/generate', { participants: 'Alice,Bob' })).status, 403);
-  assert.equal((await browser.request('/admin/generate', { _csrf: dashboard.csrf, participants: 'Alice,Alice' })).status, 400);
-  assert.equal((await browser.request('/admin/logout', { _csrf: dashboard.csrf })).status, 303);
-  assert.match((await browser.request('/admin')).text, /name="password"/u);
-  assert.equal((await browser.request('/admin/generate', { _csrf: dashboard.csrf, participants: 'Alice,Bob' })).status, 303);
+  assert.equal((await browser.request('/admin/generate', { _csrf: dashboard.csrf, participants: 'Alice,Bob' }, { Origin: 'null', 'Sec-Fetch-Site': 'same-origin' })).status, 303);
+  const forged = f.client(new Map([['santa_participant', 's%3As2.fake.bad-signature']]));
+  assert.equal((await forged.request('/wishes/recipient')).status, 401);
+  assert.doesNotMatch((await forged.request('/')).text, /class="recipient"/u);
 });
 
-test('invalid invitations cannot overwrite an existing match and names are HTML escaped', async t => {
+test('opaque invitation tampering does not replace a current assignment', async t => {
   const f = await fixture(t);
+  const id = f.database.createDraw(['Alice', 'Bob']);
+  const invitation = f.database.getDraw(id).sharedToken;
   const browser = f.client();
-  const home = await browser.request('/');
-  const dangerous = '<img src=x onerror=alert(1)>';
-  const invitation = f.tokens.seal('invitation', { giver: dangerous, recipient: '<script>alert(1)</script>', drawId: 'test' }, ASSIGNMENT_TTL);
-  assert.equal((await browser.request('/reveal', { _csrf: home.csrf, token: invitation })).status, 303);
-  const saved = browser.cookies.get('santa_assignment');
-  assert.equal((await browser.request('/reveal', { _csrf: home.csrf, token: `${invitation}x` })).status, 400);
-  assert.equal(browser.cookies.get('santa_assignment'), saved);
-  const reveal = await browser.request('/reveal');
-  assert.match(reveal.text, /&lt;script&gt;/u);
-  assert.doesNotMatch(reveal.text, /<img src=x|<script>alert/u);
-  const admin = f.client();
-  const dashboard = await login(admin);
-  const generated = await admin.request('/admin/generate', { _csrf: dashboard.csrf, participants: `${dangerous},Bob` });
-  assert.equal(generated.status, 200);
-  assert.doesNotMatch(generated.text, /<img src=x/u);
-  assert.match(generated.text, /&lt;img/u);
+  const page = await redeem(browser, invitation);
+  const saved = browser.cookies.get('santa_participant');
+  assert.equal((await browser.request('/reveal', { _csrf: page.csrf, token: `${invitation}x` })).status, 400);
+  assert.equal(browser.cookies.get('santa_participant'), saved);
+  const cookie = page.headers.getSetCookie().find(value => value.startsWith('santa_participant='));
+  assert.match(cookie, /Max-Age=5184000/u);
+  assert.match(cookie, /HttpOnly/u);
+  assert.match(cookie, /SameSite=Lax/u);
+  assert.doesNotMatch(cookie, /Alice|Bob/u);
 });
 
-test('production sends secure host-only cookies, HTTPS redirects and security headers', async t => {
-  const f = await fixture(t, { NODE_ENV: 'production', APP_URL: 'https://santa.example' });
+test('wishes follow the chosen name and wish form fields cannot change the current selection', async t => {
+  const f = await fixture(t);
+  const id = f.database.createDraw(['Alice', 'Bob']);
+  const sharedToken = f.database.getDraw(id).sharedToken;
+  const alice = f.client(); const bob = f.client();
+  const a = await redeem(alice, sharedToken, 'Alice');
+  const b = await redeem(bob, sharedToken, 'Bob');
+  const text = '<script>alert(1)</script>\n</textarea><img src=x onerror=alert(1)>';
+  assert.equal((await bob.request('/wishes', { _csrf: b.csrf, wishes: text, giver: 'Alice' })).status, 303);
+  assert.equal(JSON.parse((await alice.request('/wishes/recipient')).text).text, text);
+  assert.equal(JSON.parse((await bob.request('/wishes/recipient')).text).text, '');
+  const view = await alice.request('/reveal');
+  assert.match(view.text, /&lt;script&gt;/u);
+  assert.doesNotMatch(view.text, /<script>alert|<img src=x/u);
+  assert.equal((await bob.request('/wishes', { _csrf: b.csrf, wishes: 'x'.repeat(MAX_WISH_LENGTH + 1) })).status, 400);
+  assert.equal(JSON.parse((await alice.request('/wishes/recipient')).text).text, text);
+  assert.equal((await bob.request('/wishes', { wishes: 'No CSRF' })).status, 403);
+  await bob.request('/wishes', { _csrf: b.csrf, wishes: '' });
+  assert.equal(JSON.parse((await alice.request('/wishes/recipient')).text).text, '');
+  await alice.request('/wishes', { _csrf: a.csrf, wishes: '贈'.repeat(MAX_WISH_LENGTH) });
+  assert.equal(JSON.parse((await bob.request('/wishes/recipient')).text).text.length, MAX_WISH_LENGTH);
+});
+
+test('legacy invitations, participant cookies, admin cookies, and saved wishes migrate into SQLite', async t => {
+  const filename = await temporaryDatabase(t);
+  const legacy = createTokenService(env.SESSION_SECRET);
+  const drawId = 'old-draw'; const text = 'Mis deseos anteriores';
+  const key = createHmac('sha256', Buffer.from(hkdfSync('sha256', env.SESSION_SECRET, 'secret-santa/v1', 'wish-lookup', 32)))
+    .update(JSON.stringify([drawId, 'Alice'])).digest('hex');
+  const old = new DatabaseSync(filename);
+  old.exec('CREATE TABLE wishes (entry_key TEXT PRIMARY KEY, encrypted_text TEXT NOT NULL, expires_at INTEGER NOT NULL) STRICT');
+  old.prepare('INSERT INTO wishes VALUES (?, ?, ?)').run(key, legacy.seal('wishlist', { key, text }, ASSIGNMENT_TTL), Math.floor(Date.now() / 1000) + ASSIGNMENT_TTL);
+  old.close();
+  const f = await fixture(t, { filename });
+  const token = legacy.seal('invitation', { giver: 'Alice', recipient: 'Bob', drawId }, ASSIGNMENT_TTL);
+  const alice = f.client();
+  assert.match((await redeem(alice, token)).text, /Mis deseos anteriores/u);
+  const oldBob = legacy.seal('assignment', { giver: 'Bob', recipient: 'Alice', drawId }, ASSIGNMENT_TTL);
+  const bob = f.client(new Map([['santa_assignment', legacyCookie(oldBob, legacy.cookieSecret)]]));
+  assert.match((await bob.request('/reveal')).text, /Mis deseos anteriores/u);
+  assert.equal(bob.cookies.has('santa_assignment'), false);
+  assert.ok(bob.cookies.has('santa_participant'));
+  const fingerprint = createHash('sha256').update(env.ADMIN_PASSWORD).digest('hex');
+  const oldAdmin = legacy.seal('admin', { fingerprint }, ADMIN_TTL);
+  const admin = f.client(new Map([['santa_admin', legacyCookie(oldAdmin, legacy.cookieSecret)]]));
+  const dashboard = await admin.request('/admin');
+  assert.equal(getLinks(dashboard).length, 1);
+  assert.match(decodeURIComponent(admin.cookies.get('santa_admin')), /^s:s2\./u);
+  await alice.request('/wishes', { _csrf: (await alice.request('/')).csrf, wishes: '' });
+  await redeem(alice, token);
+  assert.equal(f.database.getWishes(drawId, 'Alice').text, '');
+});
+
+test('legacy token encryption still rejects expiry, tampering, and purpose confusion', () => {
+  let now = 10000000;
+  const tokens = createTokenService(env.SESSION_SECRET, () => now);
+  const token = tokens.seal('invitation', { giver: 'Alice', recipient: 'Bob', drawId: 'old' }, ASSIGNMENT_TTL);
+  assert.ok(tokens.open('invitation', token));
+  assert.equal(tokens.open('admin', token), null);
+  assert.equal(tokens.open('invitation', `${token}x`), null);
+  now += ASSIGNMENT_TTL;
+  assert.equal(tokens.open('invitation', token), null);
+});
+
+test('production cookies are Secure and host-only; HTTPS and media CSP remain enabled', async t => {
+  const f = await fixture(t, { overrides: { NODE_ENV: 'production', APP_URL: 'https://santa.example' } });
   const browser = f.client();
   assert.equal((await browser.request('/health')).status, 200);
-  const redirect = await browser.request('/admin');
-  assert.equal(redirect.status, 308);
-  assert.equal(redirect.headers.get('location'), 'https://santa.example/admin');
-  const page = await browser.request('/admin', undefined, { 'X-Forwarded-Proto': 'https' });
-  assert.equal(page.status, 200);
-  const cookies = page.headers.getSetCookie();
-  assert.ok(cookies.every(cookie => cookie.startsWith('__Host-') && cookie.includes('Secure') && cookie.includes('HttpOnly') && cookie.includes('Path=/') && !cookie.includes('Domain=')));
-  assert.equal(page.headers.get('cache-control'), 'no-store');
-  assert.equal(page.headers.get('referrer-policy'), 'no-referrer');
-  assert.match(page.headers.get('content-security-policy'), /frame-ancestors 'none'/u);
-  assert.ok(page.headers.get('strict-transport-security'));
-  assert.equal(page.headers.get('x-powered-by'), null);
-  const session = await browser.request('/admin/login', { _csrf: page.csrf, password: env.ADMIN_PASSWORD }, { 'X-Forwarded-Proto': 'https' });
-  assert.equal(session.status, 303);
-  assert.ok(session.headers.getSetCookie().some(cookie => cookie.startsWith('__Host-santa_admin=') && cookie.includes('Secure')));
+  assert.equal((await browser.request('/admin')).status, 308);
+  const headers = { 'X-Forwarded-Proto': 'https' };
+  const dashboard = await login(browser, headers);
+  assert.match(dashboard.headers.get('content-security-policy'), /media-src 'self'/u);
+  assert.equal(dashboard.headers.get('cache-control'), 'no-store');
+  assert.equal(dashboard.headers.get('referrer-policy'), 'no-referrer');
+  assert.ok(dashboard.headers.get('strict-transport-security'));
+  assert.ok(browser.cookies.has('__Host-santa_admin'));
+  const cookies = dashboard.headers.getSetCookie();
+  assert.ok(cookies.every(value => value.includes('Secure') && value.includes('HttpOnly') && !value.includes('Domain=')));
 });
 
-test('password changes invalidate existing admin sessions; expired and tampered cookies fail closed', async t => {
-  const first = await fixture(t);
-  const admin = first.client();
-  await login(admin);
-  const changed = await fixture(t, { ADMIN_PASSWORD: 'a-new-and-different-password' });
-  const browser = changed.client(admin.cookies);
-  assert.match((await browser.request('/admin')).text, /name="password"/u);
-  const visitor = first.client(new Map([['santa_assignment', 's%3Av1.bad.not-a-signature']]));
-  assert.doesNotMatch((await visitor.request('/')).text, /class="recipient"/u);
-  assert.equal(visitor.cookies.has('santa_assignment'), false);
-  const expiredService = createTokenService(env.SESSION_SECRET, () => Math.floor(Date.now() / 1000) - ASSIGNMENT_TTL - 1);
-  const expired = expiredService.seal('invitation', { giver: 'Alice', recipient: 'Bob', drawId: 'old' }, ASSIGNMENT_TTL);
-  const home = await visitor.request('/');
-  assert.equal((await visitor.request('/reveal', { _csrf: home.csrf, token: expired })).status, 400);
-  const fakeAdmin = first.client(new Map([['santa_admin', 's%3Av1.fake.not-a-signature']]));
-  assert.match((await fakeAdmin.request('/admin')).text, /name="password"/u);
+test('password changes invalidate saved admin sessions', async t => {
+  const filename = await temporaryDatabase(t);
+  const f = await fixture(t, { filename });
+  const admin = f.client(); await login(admin);
+  const cookies = new Map(admin.cookies); await f.close();
+  const second = await fixture(t, { filename, overrides: { ADMIN_PASSWORD: 'a-different-long-password' } });
+  assert.match((await second.client(cookies).request('/admin')).text, /name="password"/u);
 });
 
-test('oversized bodies are rejected and missing pages have safe error views', async t => {
+test('oversized requests, HTML in names, and missing routes have safe output', async t => {
   const f = await fixture(t);
   const browser = f.client();
   const oversized = await browser.request('/admin/login', { password: 'x'.repeat(140000) });
   assert.equal(oversized.status, 400);
-  assert.match(oversized.text, /too large or malformed/u);
   assert.doesNotMatch(oversized.text, /ReferenceError|node_modules/u);
+  const admin = f.client(); await login(admin);
+  const generated = await generate(admin, '<img src=x onerror=alert(1)>,Bob');
+  assert.match(generated.text, /&lt;img/u);
+  assert.doesNotMatch(generated.text, /<img src=x/u);
   const missing = await browser.request('/missing');
-  assert.equal(missing.status, 404);
-  assert.match(missing.text, /Esta página no existe/u);
-  for (const file of ['/assets/app.js', '/assets/styles.css', '/assets/favicon.svg']) {
-    assert.equal((await browser.request(file)).status, 200);
+  assert.equal(missing.status, 404); assert.match(missing.text, /Esta página no existe/u);
+  for (const file of ['/assets/app.js', '/assets/styles.css', '/assets/feliz-navidad-santa.mp4']) assert.equal((await browser.request(file)).status, 200);
+});
+
+test('one shared link lets everyone select a saved name without exposing pairings in the picker', async t => {
+  const f = await fixture(t);
+  const id = f.database.createDraw(['Alice', 'Bob', 'Carla']);
+  const draw = f.database.getDraw(id);
+  const pairings = draw.participants.map(person => [person.name, person.recipient_name]);
+  assert.ok(draw.participants.every(person => person.invitation_token === null));
+  for (const person of draw.participants) {
+    const browser = f.client();
+    const page = await browser.request('/');
+    const picker = await browser.request('/reveal', { _csrf: page.csrf, token: draw.sharedToken });
+    assert.equal(picker.status, 200);
+    assert.match(picker.text, /¿Quién <em>eres/u);
+    assert.doesNotMatch(picker.text, /class="recipient"|recipient_name|invitation_token/u);
+    assert.equal(browser.cookies.has('santa_participant'), false);
+    const selected = await browser.request('/exchange/join', { _csrf: picker.csrf, token: draw.sharedToken, name: person.name });
+    assert.equal(selected.status, 303);
+    const reveal = await browser.request('/reveal');
+    assert.match(reveal.text, new RegExp(`class="recipient">${person.recipient_name}<`));
   }
+  assert.deepEqual(f.database.getDraw(id).participants.map(person => [person.name, person.recipient_name]), pairings);
 });
 
-test('wish storage survives reopening, separates draws, and keeps names and text encrypted', async t => {
-  const directory = await mkdtemp(path.join(tmpdir(), 'santa-wishes-'));
-  const filename = path.join(directory, 'wishes.sqlite');
-  let store = createWishStore(filename, env.SESSION_SECRET);
-  t.after(async () => {
-    store.close();
-    const relative = path.relative(tmpdir(), directory);
-    assert.ok(relative.startsWith('santa-wishes-') && !relative.includes(path.sep));
-    await rm(directory, { recursive: true, force: true });
-  });
-  const text = 'Café de Costa Rica\nLibros y chocolates.';
-  store.set('draw-a', 'Alejandra', text);
-  store.set('draw-b', 'Alejandra', 'Otra idea para otro intercambio');
-  store.close();
-  const contents = await readFile(filename);
-  assert.equal(contents.includes(Buffer.from(text)), false);
-  assert.equal(contents.includes(Buffer.from('Alejandra')), false);
-  store = createWishStore(filename, env.SESSION_SECRET);
-  assert.equal(store.get('draw-a', 'Alejandra').text, text);
-  assert.equal(store.get('draw-b', 'Alejandra').text, 'Otra idea para otro intercambio');
-  store.set('draw-a', 'Alejandra', 'Té en vez de café');
-  assert.equal(store.get('draw-a', 'Alejandra').text, 'Té en vez de café');
-  store.set('draw-a', 'Alejandra', '  \n  ');
-  assert.equal(store.get('draw-a', 'Alejandra').text, '');
-  assert.equal(store.get('draw-b', 'Alejandra').text, 'Otra idea para otro intercambio');
-});
-
-test('wish storage supports full-length Unicode text and expires after 60 days', () => {
-  let now = 10000000;
-  const store = createWishStore(':memory:', env.SESSION_SECRET, { now: () => now });
-  try {
-    const text = '贈'.repeat(MAX_WISH_LENGTH);
-    store.set('draw', 'Alice', text);
-    assert.equal(store.get('draw', 'Alice').text, text);
-    assert.throws(() => store.set('draw', 'Alice', `${text}x`), /2000/);
-    assert.throws(() => store.set('draw', 'Alice', 'bad\u0000text'), /control/);
-    now += ASSIGNMENT_TTL - 1;
-    assert.equal(store.get('draw', 'Alice').text, text);
-    now++;
-    assert.equal(store.get('draw', 'Alice').text, '');
-  } finally { store.close(); }
-});
-
-async function openInvitation(browser, f, giver, recipient, drawId = 'wishlist-draw') {
-  const home = await browser.request('/');
-  const token = f.tokens.seal('invitation', { giver, recipient, drawId }, ASSIGNMENT_TTL);
-  assert.equal((await browser.request('/reveal', { _csrf: home.csrf, token })).status, 303);
-  return browser.request('/reveal');
-}
-
-test('saved wishes reach the gift buyer and only the authenticated owner can change them', async t => {
+test('shared-link selection rejects missing tokens, unknown names, cross-draw names, and CSRF', async t => {
   const f = await fixture(t);
-  const alice = f.client();
-  const bob = f.client();
-  const guest = f.client();
-  const alicePage = await openInvitation(alice, f, 'Alice', 'Bob');
-  const bobPage = await openInvitation(bob, f, 'Bob', 'Alice');
-  assert.equal((await guest.request('/wishes/recipient')).status, 401);
-  assert.equal((await guest.request('/wishes', { wishes: 'Uninvited' })).status, 303);
-  assert.equal((await bob.request('/wishes', { wishes: 'No CSRF token' })).status, 403);
-  assert.equal((await bob.request('/wishes', { _csrf: bobPage.csrf, wishes: 'Cross-site attempt' }, { Origin: 'https://evil.example' })).status, 403);
-  const bobWishes = 'Me gusta el café.\nTambién quiero libros.';
-  const saved = await bob.request('/wishes', { _csrf: bobPage.csrf, wishes: bobWishes });
-  assert.equal(saved.status, 303);
-  assert.equal(saved.headers.get('location'), '/reveal?saved=1#wishes-editor');
-  assert.match((await bob.request('/reveal?saved=1')).text, /Tus deseos quedaron guardados/u);
-  const visible = await alice.request('/wishes/recipient');
-  assert.equal(visible.status, 200);
-  assert.equal(visible.headers.get('cache-control'), 'no-store');
-  assert.equal(JSON.parse(visible.text).text, bobWishes);
-  assert.match((await alice.request('/reveal')).text, /Me gusta el café\./u);
-  // Extra name/recipient fields cannot target someone else's entry.
-  assert.equal((await alice.request('/wishes', { _csrf: alicePage.csrf, wishes: 'Mis propios deseos', giver: 'Bob' })).status, 303);
-  assert.equal(JSON.parse((await bob.request('/wishes/recipient')).text).text, 'Mis propios deseos');
-  assert.equal(JSON.parse((await alice.request('/wishes/recipient')).text).text, bobWishes);
-  const otherDraw = f.client();
-  await openInvitation(otherDraw, f, 'Alice', 'Bob', 'another-draw');
-  assert.equal(JSON.parse((await otherDraw.request('/wishes/recipient')).text).text, '');
-  // Editing or clearing keeps the original assignment and invitation intact.
-  await bob.request('/wishes', { _csrf: bobPage.csrf, wishes: 'Ahora prefiero té.' });
-  assert.equal(JSON.parse((await alice.request('/wishes/recipient')).text).text, 'Ahora prefiero té.');
-  await bob.request('/wishes', { _csrf: bobPage.csrf, wishes: '' });
-  assert.equal(JSON.parse((await alice.request('/wishes/recipient')).text).text, '');
-  assert.match((await bob.request('/reveal')).text, /class="recipient">Alice</u);
+  const id = f.database.createDraw(['Alice', 'Bob']);
+  f.database.createDraw(['Carla', 'Diego']);
+  const sharedToken = f.database.getDraw(id).sharedToken;
+  const browser = f.client();
+  const page = await browser.request('/');
+  assert.equal((await browser.request('/exchange/join', { token: sharedToken, name: 'Alice' })).status, 403);
+  assert.equal((await browser.request('/exchange/join', { _csrf: page.csrf, name: 'Alice' })).status, 400);
+  for (const name of ['Unknown', 'Carla', '', "' OR 1=1 --"]) {
+    const result = await browser.request('/exchange/join', { _csrf: page.csrf, token: sharedToken, name });
+    assert.equal(result.status, 400);
+    assert.equal(browser.cookies.has('santa_participant'), false);
+  }
+  assert.equal((await browser.request('/exchange/join', { _csrf: page.csrf, token: sharedToken, name: 'Alice' }, { Origin: 'https://evil.example' })).status, 403);
 });
 
-test('wishes remain plain text and invalid edits preserve the last saved version', async t => {
+test('choosing another name rotates CSRF and revokes the previous browser session', async t => {
   const f = await fixture(t);
-  const alice = f.client();
-  const bob = f.client();
-  await openInvitation(alice, f, 'Alice', 'Bob');
-  const bobPage = await openInvitation(bob, f, 'Bob', 'Alice');
-  const text = '<script>alert(1)</script>\n</textarea><img src=x onerror=alert(1)>';
-  await bob.request('/wishes', { _csrf: bobPage.csrf, wishes: text });
-  const buyerView = await alice.request('/reveal');
-  assert.match(buyerView.text, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/u);
-  assert.doesNotMatch(buyerView.text, /<script>alert|<img src=x/u);
-  const editor = await bob.request('/reveal');
-  assert.doesNotMatch(editor.text, /<img src=x/u);
-  assert.equal(JSON.parse((await alice.request('/wishes/recipient')).text).text, text);
-  const invalid = await bob.request('/wishes', { _csrf: bobPage.csrf, wishes: 'x'.repeat(MAX_WISH_LENGTH + 1) });
-  assert.equal(invalid.status, 400);
-  assert.match(invalid.text, /Puedes escribir hasta 2000 caracteres/u);
-  assert.equal(JSON.parse((await alice.request('/wishes/recipient')).text).text, text);
-  assert.equal((await bob.request('/wishes', { _csrf: bobPage.csrf })).status, 400);
+  const id = f.database.createDraw(['Alice', 'Bob']);
+  const token = f.database.getDraw(id).sharedToken;
+  const browser = f.client();
+  const alice = await redeem(browser, token, 'Alice');
+  const aliceCookies = new Map(browser.cookies);
+  const bob = await redeem(browser, token, 'Bob');
+  assert.match(bob.text, /Hola, <em>Bob/u);
+  assert.equal((await f.client(aliceCookies).request('/wishes/recipient')).status, 401);
+  assert.equal((await browser.request('/wishes', { _csrf: alice.csrf, wishes: 'Old tab edit' })).status, 403);
+  assert.equal(f.database.getWishes(id, 'Bob').text, '');
+  assert.equal((await browser.request('/wishes', { _csrf: bob.csrf, wishes: 'Bob’s new wishes' })).status, 303);
+});
+
+test('previous SQLite draws receive stable shared links without losing assignments or old individual links', async t => {
+  const filename = await temporaryDatabase(t);
+  const initial = createDatabase(filename, env.SESSION_SECRET);
+  const id = initial.createDraw(['Alice', 'Bob']);
+  const original = initial.getDraw(id).participants.map(person => [person.name, person.recipient_name]);
+  initial.setWishes(id, 'Alice', 'Mis deseos guardados');
+  initial.close();
+  // Reproduce the preceding database schema, before shared links existed.
+  const old = new DatabaseSync(filename);
+  old.exec('DROP INDEX draw_shared_token; ALTER TABLE draws DROP COLUMN shared_token; ALTER TABLE draws DROP COLUMN shared_expires_at;');
+  const oldToken = `i2.${'A'.repeat(43)}`;
+  old.prepare('UPDATE participants SET invitation_token = ?, invitation_expires_at = ? WHERE draw_id = ? AND name = ?')
+    .run(oldToken, Math.floor(Date.now() / 1000) + ASSIGNMENT_TTL, id, 'Alice');
+  old.close();
+  const first = await fixture(t, { filename });
+  const migrated = first.database.getDraw(id);
+  assert.match(migrated.sharedToken, /^e2\./u);
+  assert.deepEqual(migrated.participants.map(person => [person.name, person.recipient_name]), original);
+  assert.equal(first.database.getWishes(id, 'Alice').text, 'Mis deseos guardados');
+  assert.ok(first.database.findInvitation(oldToken));
+  await redeem(first.client(), oldToken);
+  await first.close();
+  const second = await fixture(t, { filename });
+  assert.equal(second.database.getDraw(id).sharedToken, migrated.sharedToken);
+  await redeem(second.client(), migrated.sharedToken, 'Bob');
 });

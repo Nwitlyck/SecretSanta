@@ -1,5 +1,8 @@
 import { parseParticipants } from './matching.js';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 
 export function loadConfig(env = process.env) {
   const production = env.NODE_ENV === 'production';
@@ -36,14 +39,14 @@ export function loadConfig(env = process.env) {
     throw new Error('TRUST_PROXY must be a number of trusted reverse proxy hops from 0 to 10.');
   }
   const participants = env.PARTICIPANTS?.trim() ? parseParticipants(env.PARTICIPANTS) : [];
-  const configuredDbPath = env.WISHLIST_DB_PATH?.trim();
+  const configuredDbPath = env.DATABASE_PATH?.trim() || env.WISHLIST_DB_PATH?.trim();
   if (production && ((!configuredDbPath && !env.RAILWAY_VOLUME_MOUNT_PATH) || configuredDbPath === ':memory:')) {
-    throw new Error('Attach a Railway persistent volume or set WISHLIST_DB_PATH to a persistent SQLite file.');
+    throw new Error('Attach a Railway persistent volume or set DATABASE_PATH to a persistent SQLite file.');
   }
-  const wishlistDbPath = configuredDbPath === ':memory:' ? configuredDbPath
-    : path.resolve(configuredDbPath || path.join(env.RAILWAY_VOLUME_MOUNT_PATH || 'data', 'wishes.sqlite'));
+  const databasePath = configuredDbPath === ':memory:' ? configuredDbPath
+    : path.resolve(projectRoot, configuredDbPath || path.join(env.RAILWAY_VOLUME_MOUNT_PATH || 'data', 'wishes.sqlite'));
   return Object.freeze({
-    port, production, origin: origin.origin, proxyHops, participants, wishlistDbPath,
+    port, production, origin: origin.origin, proxyHops, participants, databasePath,
     adminPassword: env.ADMIN_PASSWORD,
     sessionSecret: env.SESSION_SECRET,
   });

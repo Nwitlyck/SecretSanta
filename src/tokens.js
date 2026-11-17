@@ -1,5 +1,7 @@
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from 'node:crypto';
 
+// v1 compatibility: new invitations and sessions are stored in SQLite.
+
 export const DAY = 24 * 60 * 60;
 export const ASSIGNMENT_TTL = 60 * DAY;
 export const ADMIN_TTL = 8 * 60 * 60;

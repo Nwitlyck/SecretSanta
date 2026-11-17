@@ -28,3 +28,17 @@
 /* CSS also releases the overlay when JavaScript is disabled or unavailable. */
 @keyframes loader-dismiss{to{visibility:hidden;pointer-events:none}}
 @media(prefers-reduced-motion:reduce){.page-loader video{display:none}}
+.saved-draws{max-width:650px;margin:0 0 28px}
+.saved-draw-picker{display:flex;gap:12px;align-items:center}
+.saved-draw-picker select{flex:1;min-width:0;padding:12px;border:1px solid var(--line);border-radius:5px;background:#fffefa;color:var(--ink);font:inherit;font-size:12px}
+.saved-draw-picker select:focus-visible{outline:2px solid var(--red);outline-offset:2px}
+@media(max-width:420px){.saved-draw-picker{flex-direction:column;align-items:stretch}}
+.choose-page{width:100%;max-width:560px;text-align:center;margin:60px auto 75px}
+.choose-page>.eyebrow{color:var(--red)}
+.choose-page h1{margin:18px 0 22px}
+.choose-panel{margin-top:30px;text-align:left}
+.choose-panel select{display:block;width:100%;padding:13px;border:1px solid var(--line);border-radius:5px;background:#fffefa;color:var(--ink);font:inherit;font-size:14px}
+.choose-panel select:focus-visible{outline:2px solid var(--red);outline-offset:2px}
+.shared-link-actions{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-top:16px}
+.change-name{display:inline-block;margin:0 0 10px}
+@media(max-width:720px){.choose-page{margin:40px auto 50px}.choose-page h1{font-size:48px}.choose-page>p{font-size:12px}}

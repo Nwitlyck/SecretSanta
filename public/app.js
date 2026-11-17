@@ -31,7 +31,8 @@ function announce(message) {
 }
 
 // Fragment tokens stay out of HTTP URLs, referrers, server logs and the final address bar.
-if (location.hash) {
+function openInvitationFromFragment() {
+  if (!location.hash) return;
   const token = new URLSearchParams(location.hash.slice(1)).get('token');
   if (token && document.getElementById('invitation-form')) {
     history.replaceState(null, '', location.pathname);
@@ -39,6 +40,8 @@ if (location.hash) {
     document.getElementById('invitation-form').requestSubmit();
   }
 }
+openInvitationFromFragment();
+window.addEventListener('hashchange', openInvitationFromFragment);
 
 async function copyText(value, input) {
   try {
@@ -49,7 +52,7 @@ async function copyText(value, input) {
       input.focus();
       input.select();
       announce('Select and copy this link using your keyboard or device menu.');
-    } else announce('Clipboard access is unavailable. Use Save link bundle instead.');
+    } else announce('Clipboard access is unavailable. Select and copy the link manually.');
   }
 }
 
@@ -59,28 +62,6 @@ document.querySelectorAll('[data-copy]').forEach(button => {
     copyText(input.value, input);
   });
 });
-
-const bundle = document.getElementById('link-bundle');
-if (bundle) {
-  const links = [...bundle.querySelectorAll('.participant-link')].map(row => ({
-    participant: row.dataset.participant,
-    url: row.querySelector('input').value,
-  }));
-  document.getElementById('copy-all').addEventListener('click', () => {
-    copyText(links.map(link => `${link.participant}\n${link.url}`).join('\n\n'));
-  });
-  document.getElementById('download-links').addEventListener('click', () => {
-    const contents = { version: 1, drawId: bundle.dataset.drawId, expiresAt: bundle.dataset.expiresAt, links };
-    const blob = new Blob([JSON.stringify(contents, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = `secret-santa-links-${bundle.dataset.drawId.slice(0, 8)}.json`;
-    anchor.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    announce('Link bundle saved. Keep it somewhere private.');
-  });
-}
 
 const participants = document.getElementById('participants');
 if (participants) {
@@ -108,8 +89,9 @@ if (recipientWishes) {
   const status = document.getElementById('wishlist-sync-status');
   document.getElementById('wishlist-live-note').hidden = false;
   let refreshing = false;
+  let sessionChanged = false;
   async function refreshWishes() {
-    if (document.visibilityState === 'hidden' || refreshing) return;
+    if (document.visibilityState === 'hidden' || refreshing || sessionChanged) return;
     refreshing = true;
     try {
       const response = await fetch('/wishes/recipient', {
@@ -123,6 +105,12 @@ if (recipientWishes) {
       if (!response.ok) throw new Error('Wish refresh failed.');
       const data = await response.json();
       if (typeof data.text !== 'string') throw new Error('Invalid wish response.');
+      if (data.viewer?.name !== recipientWishes.dataset.viewer || data.viewer?.drawId !== recipientWishes.dataset.drawId) {
+        sessionChanged = true;
+        status.textContent = 'Elegiste otro nombre en otra pestaña. Recarga esta página antes de continuar.';
+        document.querySelector('#wishes-form button[type="submit"]').disabled = true;
+        return;
+      }
       // Gift ideas are always plain text, including anything resembling HTML.
       if (text.textContent !== data.text) text.textContent = data.text;
       text.hidden = !data.text;

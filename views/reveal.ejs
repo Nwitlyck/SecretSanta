@@ -11,13 +11,14 @@
     <p>Un detalle con cariño hace la diferencia.<br>Elige algo que le saque una sonrisa.</p>
     <span class="keep-secret">Que quede entre nosotros.</span>
   </section>
-  <section class="panel wishlist-panel recipient-wishes" aria-labelledby="recipient-wishes-heading" id="recipient-wishes">
+  <section class="panel wishlist-panel recipient-wishes" aria-labelledby="recipient-wishes-heading" id="recipient-wishes" data-viewer="<%= assignment.giver %>" data-draw-id="<%= assignment.drawId %>">
     <span class="eyebrow">UNA PISTA PARA ACERTAR</span>
     <h2 id="recipient-wishes-heading">Lo que le gustaría a <%= assignment.recipient %></h2>
     <p class="wishlist-text" id="recipient-wishes-text" aria-live="polite" <%= recipientWishes.text ? '' : 'hidden' %>><%= recipientWishes.text %></p>
     <p class="wishlist-empty muted" id="recipient-wishes-empty" <%= recipientWishes.text ? 'hidden' : '' %>>Todavía no ha escrito sus deseos. Vuelve más tarde para ver sus ideas.</p>
     <p class="wishlist-sync small muted" id="wishlist-sync-status">Los cambios aparecerán al volver a abrir esta página.<span id="wishlist-live-note" hidden> También se actualizan automáticamente mientras estás aquí.</span></p>
   </section>
+  <% if (sharedUrl) { %><a class="text-button change-name" href="<%= sharedUrl %>">¿Elegiste otro nombre? Volver a la lista</a><% } %>
   <section class="panel wishlist-panel" id="wishes-editor" aria-labelledby="my-wishes-heading">
     <span class="eyebrow">DALE UNA PISTA A QUIEN TE REGALA</span>
     <h2 id="my-wishes-heading">Qué me gustaría recibir</h2>

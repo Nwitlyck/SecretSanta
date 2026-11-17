@@ -1,29 +1,31 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
-import { createAssignments, parseParticipants } from './matching.js';
+import { parseParticipants } from './matching.js';
 import { ADMIN_TTL, ASSIGNMENT_TTL, createTokenService } from './tokens.js';
-import { createWishStore, MAX_WISH_LENGTH, normalizeWishes } from './wishes.js';
+import { MAX_WISH_LENGTH, normalizeWishes } from './wishes.js';
+import { createDatabase } from './database.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const digest = value => createHash('sha256').update(value).digest();
 const equal = (a, b) => typeof a === 'string' && typeof b === 'string' && timingSafeEqual(digest(a), digest(b));
 
-export function createApp(config, { wishStore } = {}) {
+export function createApp(config, { database } = {}) {
   const app = express();
-  const wishes = wishStore ?? createWishStore(config.wishlistDbPath, config.sessionSecret);
-  app.locals.closeDatabase = () => wishes.close();
+  const store = database ?? createDatabase(config.databasePath, config.sessionSecret);
+  app.locals.closeDatabase = () => store.close();
   const tokens = createTokenService(config.sessionSecret);
-  const names = Object.fromEntries(['admin', 'assignment', 'csrf'].map(name => [name, `${config.production ? '__Host-' : ''}santa_${name}`]));
+  const names = Object.fromEntries(['admin', 'participant', 'assignment', 'csrf'].map(name => [name, `${config.production ? '__Host-' : ''}santa_${name}`]));
   const cookieOptions = {
     httpOnly: true, secure: config.production || config.origin.startsWith('https:'),
     sameSite: 'lax', path: '/', signed: true,
   };
-  const adminFingerprint = digest(config.adminPassword).toString('hex');
+  const adminFingerprint = createHmac('sha256', config.sessionSecret).update('admin-password:').update(config.adminPassword).digest('hex');
+  const legacyAdminFingerprint = digest(config.adminPassword).toString('hex');
   const setCookie = (res, name, value, ttl) => res.cookie(names[name], value, { ...cookieOptions, maxAge: ttl * 1000 });
   const clearCookie = (res, name) => res.clearCookie(names[name], cookieOptions);
 
@@ -60,7 +62,8 @@ export function createApp(config, { wishStore } = {}) {
   });
   app.use('/assets', express.static(path.join(root, 'public'), { etag: false, index: false, maxAge: 0 }));
   app.use(express.urlencoded({ extended: false, limit: '128kb', parameterLimit: 10 }));
-  app.use(cookieParser(tokens.cookieSecret));
+  // The second key accepts signed cookies from the previous stateless version.
+  app.use(cookieParser([config.sessionSecret, tokens.cookieSecret]));
   app.use((req, res, next) => {
     let csrf = req.signedCookies[names.csrf];
     if (typeof csrf !== 'string' || !/^[a-f0-9]{64}$/u.test(csrf)) {
@@ -90,58 +93,97 @@ export function createApp(config, { wishStore } = {}) {
     }
     next();
   };
+  function adminSession(req, res) {
+    const token = req.signedCookies[names.admin];
+    if (store.hasAdminSession(token, adminFingerprint)) return token;
+    const legacy = tokens.open('admin', token);
+    if (!legacy || !equal(legacy.fingerprint, legacyAdminFingerprint)) return null;
+    const sessionToken = store.createAdminSession(adminFingerprint);
+    setCookie(res, 'admin', sessionToken, ADMIN_TTL);
+    return sessionToken;
+  }
   const requireAdmin = (req, res, next) => {
-    const session = tokens.open('admin', req.signedCookies[names.admin]);
-    if (!session || !equal(session.fingerprint, adminFingerprint)) {
+    req.adminSession = adminSession(req, res);
+    if (!req.adminSession) {
       clearCookie(res, 'admin');
       return res.redirect(303, '/admin');
     }
     next();
   };
-  function renderDashboard(res, options = {}) {
-    res.render('admin', {
+  function renderDashboard(req, res, options = {}) {
+    const selectedId = typeof req.query.draw === 'string' ? req.query.draw : undefined;
+    const draw = store.getDraw(selectedId);
+    if (selectedId && !draw) return renderError(res, 404, {
+      en: ['Exchange not found', 'Choose an existing exchange from the organizer dashboard.'],
+      es: ['No encontramos el intercambio', 'Selecciona un intercambio guardado.'],
+    });
+    const sharedUrl = draw ? `${config.origin}/reveal#token=${draw.sharedToken}` : null;
+    return res.render('admin', {
       page: 'admin', title: 'The organizer’s desk — Secret Santa',
-      participants: config.participants.join('\n'), error: null, links: [], drawId: null, expiresAt: null,
+      participants: draw ? draw.participants.map(person => person.name).join('\n') : config.participants.join('\n'),
+      error: null, sharedUrl, drawId: draw?.id || null,
+      participantCount: draw?.participants.length || 0,
+      expiresAt: draw ? new Date(draw.sharedExpiresAt * 1000).toISOString().slice(0, 10) : null,
+      draws: store.listDraws(), imported: Boolean(draw?.imported),
       ...options,
     });
   }
-  function validAssignment(data) {
-    return data && typeof data.giver === 'string' && typeof data.recipient === 'string' &&
-      typeof data.drawId === 'string' && data.giver !== data.recipient;
+  function participantSession(req, res, renew = false) {
+    let token = req.signedCookies[names.participant];
+    let assignment = store.readParticipantSession(token, { renew });
+    if (!assignment) {
+      const old = tokens.open('assignment', req.signedCookies[names.assignment]);
+      assignment = old ? store.importLegacyAssignment(old) : null;
+      if (assignment) {
+        token = store.createParticipantSession(assignment);
+        setCookie(res, 'participant', token, ASSIGNMENT_TTL);
+        clearCookie(res, 'assignment');
+      }
+    }
+    return assignment ? { token, assignment } : null;
   }
   function renderReveal(req, res, assignment, options = {}) {
-    const ownWishes = wishes.get(assignment.drawId, assignment.giver);
+    const ownWishes = store.getWishes(assignment.drawId, assignment.giver);
+    const draw = store.getDraw(assignment.drawId);
     return res.render('reveal', {
       page: 'reveal', assignment, error: null,
       myWishes: ownWishes.text,
-      recipientWishes: wishes.get(assignment.drawId, assignment.recipient),
+      recipientWishes: store.getWishes(assignment.drawId, assignment.recipient),
       maxWishLength: MAX_WISH_LENGTH,
       wishesError: null,
       wishesSaved: req.query.saved === '1',
+      sharedUrl: draw?.sharedExpiresAt > Date.now() / 1000 ? `/reveal#token=${draw.sharedToken}` : null,
       ...options,
     });
   }
   const requireParticipant = (req, res, next) => {
-    const assignment = tokens.open('assignment', req.signedCookies[names.assignment]);
-    if (!validAssignment(assignment)) {
+    const session = participantSession(req, res);
+    if (!session) {
       if (req.path === '/wishes/recipient') return res.status(401).json({ error: 'Abre tu invitación de nuevo para ver los deseos.' });
       return res.redirect(303, '/reveal');
     }
-    req.assignment = assignment;
+    req.assignment = session.assignment;
+    req.participantSession = session.token;
     next();
   };
   function showPortal(req, res) {
-    const assignment = tokens.open('assignment', req.signedCookies[names.assignment]);
-    if (validAssignment(assignment)) {
-      // A fresh 60-day window on every visit; no dependency on the invitation expiry.
-      const value = { giver: assignment.giver, recipient: assignment.recipient, drawId: assignment.drawId };
-      setCookie(res, 'assignment', tokens.seal('assignment', value, ASSIGNMENT_TTL), ASSIGNMENT_TTL);
-      return renderReveal(req, res, assignment);
+    const session = participantSession(req, res, true);
+    if (session) {
+      setCookie(res, 'participant', session.token, ASSIGNMENT_TTL);
+      return renderReveal(req, res, session.assignment);
     }
+    if (req.cookies[names.participant] || req.signedCookies[names.participant] !== undefined) clearCookie(res, 'participant');
     if (req.cookies[names.assignment] || req.signedCookies[names.assignment] !== undefined) clearCookie(res, 'assignment');
     return res.render('landing', { error: null, page: 'home' });
   }
   app.get(['/', '/reveal'], showPortal);
+  function startParticipantSession(req, res, assignment) {
+    store.deleteSession(req.signedCookies[names.participant]);
+    setCookie(res, 'participant', store.createParticipantSession(assignment), ASSIGNMENT_TTL);
+    setCookie(res, 'csrf', randomBytes(32).toString('hex'), ADMIN_TTL);
+    clearCookie(res, 'assignment');
+    return res.redirect(303, '/reveal');
+  }
   app.post('/reveal', csrfProtection, (req, res) => {
     let token = typeof req.body.token === 'string' ? req.body.token.trim() : '';
     // Pasted complete links work without JavaScript. Tokens are never accepted in query strings.
@@ -149,15 +191,30 @@ export function createApp(config, { wishStore } = {}) {
       try { token = new URLSearchParams(new URL(token).hash.slice(1)).get('token') || ''; }
       catch { token = ''; }
     }
-    const assignment = tokens.open('invitation', token);
-    if (!validAssignment(assignment)) {
+    const exchange = store.findExchange(token);
+    if (exchange) return res.render('choose-participant', { page: 'home', exchange, token, error: null });
+    const legacy = tokens.open('invitation', token);
+    const assignment = store.findInvitation(token) || (legacy ? store.importLegacyAssignment(legacy) : null);
+    if (!assignment) {
       return res.status(400).render('landing', { page: 'home', error: 'Esta invitación no es válida o ya venció. Pídele el enlace original a quien organiza el intercambio.' });
     }
-    const data = { giver: assignment.giver, recipient: assignment.recipient, drawId: assignment.drawId };
-    setCookie(res, 'assignment', tokens.seal('assignment', data, ASSIGNMENT_TTL), ASSIGNMENT_TTL);
-    return res.redirect(303, '/reveal');
+    return startParticipantSession(req, res, assignment);
   });
-  app.post('/forget', csrfProtection, (_req, res) => {
+  app.post('/exchange/join', csrfProtection, (req, res) => {
+    const token = typeof req.body.token === 'string' ? req.body.token : '';
+    const exchange = store.findExchange(token);
+    if (!exchange) return res.status(400).render('landing', {
+      page: 'home', error: 'Este enlace de intercambio no es válido o ya venció. Pídele el enlace a quien organiza.',
+    });
+    const assignment = store.chooseParticipant(token, req.body.name);
+    if (!assignment) return res.status(400).render('choose-participant', {
+      page: 'home', exchange, token, error: 'Elige tu nombre de la lista. Si aparece pendiente, abre tu invitación original para recuperar tu asignación.',
+    });
+    return startParticipantSession(req, res, assignment);
+  });
+  app.post('/forget', csrfProtection, (req, res) => {
+    store.deleteSession(req.signedCookies[names.participant]);
+    clearCookie(res, 'participant');
     clearCookie(res, 'assignment');
     res.redirect(303, '/');
   });
@@ -170,16 +227,18 @@ export function createApp(config, { wishStore } = {}) {
         wishesError: error.message, wishesSaved: false,
       });
     }
-    // Identity comes exclusively from the encrypted cookie, never a form field.
-    wishes.set(req.assignment.drawId, req.assignment.giver, text);
+    // The saved session identifies the owner; form fields cannot select one.
+    store.setWishes(req.assignment.drawId, req.assignment.giver, text);
     return res.redirect(303, '/reveal?saved=1#wishes-editor');
   });
   app.get('/wishes/recipient', requireParticipant, (req, res) => {
-    res.json(wishes.get(req.assignment.drawId, req.assignment.recipient));
+    res.json({
+      ...store.getWishes(req.assignment.drawId, req.assignment.recipient),
+      viewer: { drawId: req.assignment.drawId, name: req.assignment.giver },
+    });
   });
   app.get('/admin', (req, res) => {
-    const session = tokens.open('admin', req.signedCookies[names.admin]);
-    if (session && equal(session.fingerprint, adminFingerprint)) return renderDashboard(res);
+    if (adminSession(req, res)) return renderDashboard(req, res);
     return res.render('login', { page: 'admin', title: 'Organizer sign in — Secret Santa', error: null });
   });
   app.post('/admin/login', csrfProtection, async (req, res) => {
@@ -190,11 +249,13 @@ export function createApp(config, { wishStore } = {}) {
     if (!equal(supplied, config.adminPassword)) {
       return res.status(401).render('login', { page: 'admin', title: 'Organizer sign in — Secret Santa', error: 'That password doesn’t match. Please try again.' });
     }
-    setCookie(res, 'admin', tokens.seal('admin', { fingerprint: adminFingerprint }, ADMIN_TTL), ADMIN_TTL);
+    store.deleteSession(req.signedCookies[names.admin]);
+    setCookie(res, 'admin', store.createAdminSession(adminFingerprint), ADMIN_TTL);
     setCookie(res, 'csrf', randomBytes(32).toString('hex'), ADMIN_TTL);
     return res.redirect(303, '/admin');
   });
-  app.post('/admin/logout', requireAdmin, csrfProtection, (_req, res) => {
+  app.post('/admin/logout', requireAdmin, csrfProtection, (req, res) => {
+    store.deleteSession(req.adminSession);
     clearCookie(res, 'admin');
     clearCookie(res, 'csrf');
     res.redirect(303, '/admin');
@@ -203,16 +264,9 @@ export function createApp(config, { wishStore } = {}) {
     const input = typeof req.body.participants === 'string' ? req.body.participants : '';
     let participants;
     try { participants = parseParticipants(input); }
-    catch (error) { return renderDashboard(res.status(400), { participants: input, error: error.message }); }
-    const drawId = randomBytes(16).toString('hex');
-    const links = createAssignments(participants).map(({ giver, recipient }) => ({
-      participant: giver,
-      url: `${config.origin}/reveal#token=${tokens.seal('invitation', { giver, recipient, drawId }, ASSIGNMENT_TTL)}`,
-    }));
-    return renderDashboard(res, {
-      participants: participants.join('\n'), links, drawId,
-      expiresAt: new Date(Date.now() + ASSIGNMENT_TTL * 1000).toISOString(),
-    });
+    catch (error) { return renderDashboard(req, res.status(400), { participants: input, error: error.message }); }
+    const drawId = store.createDraw(participants);
+    return res.redirect(303, `/admin?draw=${drawId}`);
   });
   app.use((_req, res) => renderError(res, 404, {
     en: ['A little lost?', 'This page doesn’t exist. Your invitation link will take you to the right place.'],

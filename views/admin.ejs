@@ -4,6 +4,14 @@
     <div><span class="eyebrow">THE ORGANIZER’S DESK</span><h1>Make a little <em>magic.</em></h1><p class="muted">Gather your people. We’ll take care of the surprise.</p></div>
     <form method="post" action="/admin/logout"><input type="hidden" name="_csrf" value="<%= csrf %>"><button type="submit" class="text-button">Sign out <span aria-hidden="true">↗</span></button></form>
   </div>
+  <% if (draws.length) { %>
+  <form method="get" action="/admin" class="saved-draws">
+    <label class="field-label" for="saved-draw">Saved exchanges</label>
+    <div class="saved-draw-picker"><select id="saved-draw" name="draw">
+      <% draws.forEach(draw => { %><option value="<%= draw.id %>" <%= draw.id === drawId ? 'selected' : '' %>><%= new Date(draw.createdAt * 1000).toISOString().slice(0, 10) %> · <%= draw.participantCount %> people · <%= draw.id.slice(0, 8) %><%= draw.imported ? ' (imported)' : '' %></option><% }); %>
+    </select><button class="button button-secondary" type="submit">Open exchange <span aria-hidden="true">↗</span></button></div>
+  </form>
+  <% } %>
   <div class="admin-grid">
     <section class="panel participant-panel" aria-labelledby="participants-title">
       <div class="card-heading"><span class="step-dot">01</span><h2 id="participants-title">The guest list</h2></div>
@@ -14,32 +22,26 @@
         <label class="field-label" for="participants">Who’s joining?</label>
         <textarea id="participants" name="participants" rows="9" required maxlength="40000" placeholder="Alice&#10;Bob&#10;Charlie&#10;Dave" aria-describedby="participant-help"><%= participants %></textarea>
         <div class="input-caption" id="participant-help"><span id="participant-count">One name, one surprise.</span><span>No one draws themselves.</span></div>
-        <% if (links.length) { %><label class="check-label"><input type="checkbox" name="confirm" value="yes" required> I’ve saved these links. Generate a new, separate draw.</label><% } %>
-        <button class="button button-primary full-width" type="submit"><%= links.length ? 'Generate a new draw' : 'Generate assignments' %><span aria-hidden="true">✳</span></button>
+        <% if (sharedUrl) { %><label class="check-label"><input type="checkbox" name="confirm" value="yes" required> Create a separate draw. Keep the existing exchange saved.</label><% } %>
+        <button class="button button-primary full-width" type="submit"><%= sharedUrl ? 'Generate a new draw' : 'Generate assignments' %><span aria-hidden="true">✳</span></button>
       </form>
     </section>
     <section class="panel links-panel" aria-labelledby="links-title">
-      <div class="card-heading"><span class="step-dot">02</span><h2 id="links-title"><%= links.length ? 'The surprises are ready' : 'A secret for everyone' %></h2><% if (links.length) { %><span class="count-badge"><%= links.length %> links</span><% } %></div>
-      <% if (links.length) { %>
-        <p class="muted">Send each person only their own link. Their match stays hidden until they open it.</p>
-        <div class="notice save-notice"><strong>Save these links before leaving.</strong> This draw isn’t stored on the server. Refreshing may generate a new draw. Leaving this page loses the list. New draws won’t cancel old links.</div>
-        <div class="link-actions"><button type="button" class="button button-secondary" id="download-links">Save link bundle <span aria-hidden="true">↓</span></button><button type="button" class="text-button" id="copy-all">Copy all links</button></div>
-        <div id="link-bundle" data-draw-id="<%= drawId %>" data-expires-at="<%= expiresAt %>">
-          <% links.forEach((link, index) => { %>
-          <div class="participant-link" data-participant="<%= link.participant %>">
-            <span class="avatar" aria-hidden="true"><%= [...link.participant][0].toUpperCase() %></span>
-            <div class="link-detail"><label for="link-<%= index %>"><%= link.participant %></label><input id="link-<%= index %>" type="text" value="<%= link.url %>" readonly autocomplete="off" aria-label="Private invitation for <%= link.participant %>"></div>
-            <button type="button" class="copy-button" data-copy="link-<%= index %>" aria-label="Copy <%= link.participant %>’s link">Copy <span aria-hidden="true">↗</span></button>
-          </div>
-          <% }); %>
-        </div>
-        <p class="card-footnote">Links are valid for 60 days. Keep the bundle private — each link grants access to its assignment.</p>
+      <div class="card-heading"><span class="step-dot">02</span><h2 id="links-title">One link for everyone</h2><% if (sharedUrl) { %><span class="count-badge"><%= participantCount %> people</span><% } %></div>
+      <% if (sharedUrl) { %>
+        <p class="muted">Share this link with the whole group. Everyone picks their own name to see their match and edit their gift wishes.</p>
+        <div class="notice save-notice"><strong>Your exchange is saved.</strong> This same link works for everyone in the exchange. Refreshing won’t change anyone’s match.</div>
+        <% if (imported) { %><p class="notice">This exchange came from older invitations. Remaining participants and their links will appear as they open their original invitations.</p><% } %>
+        <label class="field-label" for="exchange-link">Shared exchange link</label>
+        <input id="exchange-link" type="text" value="<%= sharedUrl %>" readonly autocomplete="off" spellcheck="false">
+        <div class="shared-link-actions"><button type="button" class="button button-primary" data-copy="exchange-link">Copy exchange link <span aria-hidden="true">↗</span></button><a class="text-button" href="<%= sharedUrl %>" target="_blank" rel="noopener noreferrer">Open shared link ↗</a></div>
+        <p class="card-footnote">Valid until <%= expiresAt %>. Share only with your group; anyone with this link can select a name.</p>
       <% } else { %>
-        <div class="empty-links"><%- include('partials/gift') %><h3>A little suspense is a good thing.</h3><p>Your private invitations will appear here<br>after you generate the assignments.</p></div>
+        <div class="empty-links"><%- include('partials/gift') %><h3>A little suspense is a good thing.</h3><p>Your group’s shared link will appear here<br>after you generate the assignments.</p></div>
       <% } %>
     </section>
   </div>
   <div class="organizer-notes"><span aria-hidden="true">✦</span><p>Fairly shuffled. Privately shared. Every person gives one gift and receives one, with no self matches.</p></div>
-  <noscript><p class="notice">Generation and sharing by selecting the links work without JavaScript. Enable JavaScript to copy or download the link bundle.</p></noscript>
+  <noscript><p class="notice">Select and copy the shared link manually. Participants can paste it into the invitation form to choose their name without JavaScript.</p></noscript>
 </main>
 <%- include('partials/footer') %>
