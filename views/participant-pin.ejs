@@ -3,7 +3,7 @@
   <span class="eyebrow"><%= setupRequired ? 'TU NOMBRE, TU SECRETO' : 'TU SORPRESA ESTÁ A UN PASO' %></span>
   <h1>Hola, <em><%= name %>.</em></h1>
   <p class="muted"><%= setupRequired ? 'Crea un PIN de 4 números para proteger tu nombre.' : 'Ingresa tu PIN de 4 números para abrir tu intercambio.' %></p>
-  <section class="panel choose-panel" aria-labelledby="pin-heading">
+  <section class="panel choose-panel pin-panel" aria-labelledby="pin-heading">
     <div class="card-heading"><span class="step-dot">02</span><h2 id="pin-heading"><%= setupRequired ? 'Crea tu PIN' : 'Ingresa tu PIN' %></h2></div>
     <p class="muted"><%= setupRequired ? 'Es la primera vez que se usa este nombre. Guarda tu PIN: lo necesitarás al volver a elegirlo.' : 'Tu PIN protege tu asignación y tus ideas de regalo.' %></p>
     <% if (error) { %><p class="notice error" role="alert" id="pin-error"><%= error %></p><% } %>
