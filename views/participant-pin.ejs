@@ -1,0 +1,29 @@
+<%- include('partials/header') %>
+<main class="choose-page" id="main-content">
+  <span class="eyebrow"><%= setupRequired ? 'TU NOMBRE, TU SECRETO' : 'TU SORPRESA ESTÁ A UN PASO' %></span>
+  <h1>Hola, <em><%= name %>.</em></h1>
+  <p class="muted"><%= setupRequired ? 'Crea un PIN de 4 números para proteger tu nombre.' : 'Ingresa tu PIN de 4 números para abrir tu intercambio.' %></p>
+  <section class="panel choose-panel" aria-labelledby="pin-heading">
+    <div class="card-heading"><span class="step-dot">02</span><h2 id="pin-heading"><%= setupRequired ? 'Crea tu PIN' : 'Ingresa tu PIN' %></h2></div>
+    <p class="muted"><%= setupRequired ? 'Es la primera vez que se usa este nombre. Guarda tu PIN: lo necesitarás al volver a elegirlo.' : 'Tu PIN protege tu asignación y tus ideas de regalo.' %></p>
+    <% if (error) { %><p class="notice error" role="alert" id="pin-error"><%= error %></p><% } %>
+    <form method="post" action="/exchange/unlock" id="pin-form">
+      <input type="hidden" name="_csrf" value="<%= csrf %>">
+      <input type="hidden" name="token" value="<%= token %>">
+      <input type="hidden" name="name" value="<%= name %>">
+      <input type="hidden" name="mode" value="<%= setupRequired ? 'setup' : 'login' %>">
+      <label class="field-label" for="participant-pin">PIN de 4 números</label>
+      <input class="pin-input" type="password" id="participant-pin" name="pin" inputmode="numeric" pattern="[0-9]{4}" minlength="4" maxlength="4" required autocomplete="<%= setupRequired ? 'new-password' : 'current-password' %>" aria-describedby="pin-help<%= error ? ' pin-error' : '' %>">
+      <% if (setupRequired) { %>
+      <label class="field-label" for="pin-confirmation">Repite tu PIN</label>
+      <input class="pin-input" type="password" id="pin-confirmation" name="confirmation" inputmode="numeric" pattern="[0-9]{4}" minlength="4" maxlength="4" required autocomplete="new-password">
+      <% } %>
+      <p class="small muted pin-help" id="pin-help">Solo 4 números. No compartas tu PIN con el grupo.</p>
+      <button class="button button-primary full-width" type="submit"><%= setupRequired ? 'Guardar PIN y entrar' : 'Entrar a mi intercambio' %> <span aria-hidden="true">↗</span></button>
+    </form>
+    <p class="card-footnote">Si olvidaste tu PIN, pídele a quien organiza que lo restablezca.</p>
+  </section>
+  <a class="text-button change-name" href="/reveal#token=<%= token %>">Volver a la lista de nombres</a>
+  <form method="post" action="/reveal" id="invitation-form" hidden><input type="hidden" name="_csrf" value="<%= csrf %>"><input type="hidden" id="invitation" name="token"></form>
+</main>
+<%- include('partials/footer') %>

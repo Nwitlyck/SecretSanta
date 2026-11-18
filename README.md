@@ -33,9 +33,11 @@ The app creates `data/wishes.sqlite` automatically. The filename is retained fro
 
 - **Generate assignments** saves a complete draw in a single database transaction. Everyone gives and receives exactly once, with no self matches. Matching uses cryptographically random Fisher–Yates shuffles and rejects self matches.
 - The admin dashboard lists **Saved exchanges**. Reopen any exchange to retrieve its participant list and the same shared link. Refreshing the page never generates a new draw. Generating another exchange keeps previous ones available.
-- **Copy exchange link** gives you one link for the whole group. Share that same link with everyone. Opening it shows **¿Quién eres?**; each person selects their name and chooses **Ver mi intercambio** to see their saved assignment and edit their own wishes. Selecting a name never reshuffles the exchange.
+- **Copy exchange link** gives you one link for the whole group. Share that same link with everyone. Opening it shows **¿Quién eres?**. Each person selects their name and continues to the four-digit PIN screen. Selecting a name never reshuffles the exchange.
+- **First use:** create and confirm a PIN of exactly four numbers. **Later selections:** enter the saved PIN. Leading zeroes are supported. The assignment and wishes stay hidden until the PIN is accepted. The PIN is never shown or stored as plain text.
 - Each shared link contains a random, unguessable credential and expires after 60 days. The credential stays in the URL fragment, is submitted in a CSRF-protected POST, and is removed from the address bar. Without JavaScript, paste the complete shared link into the landing-page form to open the name picker.
-- Choosing a name creates a saved participant session. The signed, HttpOnly cookie contains only a random session ID. Returning to `/` or `/reveal` remembers that selection for 60 days after the latest visit. Reopen the shared link or use **Volver a la lista** to choose a different name. Switching names revokes the browser's previous session and rotates its form token.
+- Successfully setting or entering the PIN creates a saved participant session. The signed, HttpOnly cookie contains only a random session ID. Returning to `/` or `/reveal` remembers that unlocked selection for 60 days after the latest visit. Reopen the shared link or use **Volver a la lista** to choose a different name and enter its PIN. Switching names revokes the browser's previous session and rotates its form token.
+- Five wrong PIN attempts lock that name for 15 minutes, including after a server restart. In `/admin`, expand **Participant PINs** and select **Reset PIN** to recover a forgotten or incorrectly claimed PIN. Reset signs that person out on all devices and allows a new PIN; assignments and wishes stay saved.
 - **Qué me gustaría recibir** lets each participant save and edit up to 2,000 characters of plain text. The person buying their gift sees those wishes. Updates appear on every visit, every 30 seconds while the page is visible, and when returning to the tab. With JavaScript disabled, reloading shows the latest wishes.
 - Emptying the wishes box and saving clears it. Wishes otherwise remain saved with the exchange. The latest save wins when editing from multiple devices.
 - **Borrar mi asignación de este dispositivo** signs the participant out and revokes that browser session. The original invitation still works until it expires. Wishes remain saved. Use separate browser profiles for people sharing a device.
@@ -47,7 +49,7 @@ The app creates `data/wishes.sqlite` automatically. The filename is retained fro
 | --- | --- |
 | `PORT` | Defaults to `3000`; Railway supplies its assigned port. |
 | `ADMIN_PASSWORD` | Required organizer password, at least 16 characters. |
-| `SESSION_SECRET` | Required random secret of at least 32 bytes, used for cookie signatures. Keep the previous value during an upgrade to migrate old links and encrypted wishes. |
+| `SESSION_SECRET` | Required random secret of at least 32 bytes, used for cookie signatures and PIN hashing. Keep it stable: changing it requires participants to reset their PINs. It is also needed to migrate old links and encrypted wishes. |
 | `PARTICIPANTS` | Optional initial names, separated by commas. Once a draw is saved, its participant list comes from SQLite. |
 | `DATABASE_PATH` | Optional SQLite file path. Relative paths resolve from the project root. Defaults to `./data/wishes.sqlite` locally, or `wishes.sqlite` inside Railway's attached volume. |
 | `WISHLIST_DB_PATH` | Previous name for `DATABASE_PATH`; still accepted so existing configuration works. `DATABASE_PATH` takes precedence. |
@@ -76,16 +78,20 @@ Previously issued encrypted invitation links and remembered cookies remain usabl
 
 Existing SQLite exchanges automatically receive one shared group link without changing their pairings or wishes. Previously issued individual links still work, while the dashboard now shows only the shared link. In partially imported exchanges, names with an unknown original assignment are marked **pendiente** until that participant opens their original invitation.
 
+Upgrading to PIN protection adds the required SQLite columns automatically. Previously remembered participant sessions and old individual links must also complete PIN setup or verification before revealing anything. They do not bypass the new protection.
+
 Before an old participant returns, their original link is still the way to recover their assignment. Keep the old link bundle until everyone has migrated. Older encrypted wishes must still be within their original 60-day lifetime to be imported.
 
 ## Security and verification
 
 SQLite is the source of truth. Names, pairings, and new wishes use ordinary database columns; protect the database file and its backups. Login session IDs are stored as hashes, cookies are signed, and the admin password is read from the environment rather than saved in SQLite.
 
-The shared link grants access to the group. Choosing a name is not identity verification: anyone with that link can choose any participant's name, view that assignment, and edit that name's wishes. Share it only with your trusted group. The name picker itself lists names without showing pairings or wishes.
+The shared link grants access to the name picker, without showing pairings or wishes. A claimed name requires its PIN. Initial setup is first-come: the first person choosing an unclaimed name can set its PIN, so everyone should claim their own name. An admin can reset a mistakenly claimed name. Four-digit PINs are a convenience lock, rather than strong identity verification.
+
+PINs use Node's asynchronous scrypt with a random per-person salt, a server-side pepper derived from `SESSION_SECRET`, and constant-time hash comparison. Only hashes and salts are saved. PIN changes revoke old sessions, concurrent setup requests cannot overwrite the winning PIN, and failed-attempt counters and lockouts persist in SQLite. These controls follow the principles in [OWASP's password-storage guidance](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html) and [authentication guidance](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html).
 
 Prepared SQL statements, database constraints, and transactions protect data integrity. Session checks tie the editor to the selected name and show that name's assigned recipient's wishes. Changing the owner through a wish form field is not allowed. Forms use signed CSRF tokens and origin checks. EJS escapes names and wishes, live updates use `textContent`, Helmet applies a restrictive Content Security Policy, and private responses are not cached. Production cookies require HTTPS.
 
 There is no built-in login rate limiter. Use a strong password and configure rate limiting for `POST /admin/login` at your trusted edge if exposing it publicly.
 
-Run `npm test` for matching, database restart persistence, saved exchange recovery, session expiry/revocation, authorization, plain-text safety, and migration checks. Tests use isolated databases, not your real `.env` or application data.
+Run `npm test` for matching, database restart persistence, saved exchange recovery, session expiry/revocation, PIN setup/login/lockout/reset, concurrent claims, authorization, plain-text safety, and migration checks. Tests use isolated databases, not your real `.env` or application data.

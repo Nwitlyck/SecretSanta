@@ -4,6 +4,7 @@
     <div><span class="eyebrow">THE ORGANIZER’S DESK</span><h1>Make a little <em>magic.</em></h1><p class="muted">Gather your people. We’ll take care of the surprise.</p></div>
     <form method="post" action="/admin/logout"><input type="hidden" name="_csrf" value="<%= csrf %>"><button type="submit" class="text-button">Sign out <span aria-hidden="true">↗</span></button></form>
   </div>
+  <% if (pinReset) { %><p class="notice success" role="status">PIN reset. This participant is signed out and can create a new PIN.</p><% } %>
   <% if (draws.length) { %>
   <form method="get" action="/admin" class="saved-draws">
     <label class="field-label" for="saved-draw">Saved exchanges</label>
@@ -29,18 +30,29 @@
     <section class="panel links-panel" aria-labelledby="links-title">
       <div class="card-heading"><span class="step-dot">02</span><h2 id="links-title">One link for everyone</h2><% if (sharedUrl) { %><span class="count-badge"><%= participantCount %> people</span><% } %></div>
       <% if (sharedUrl) { %>
-        <p class="muted">Share this link with the whole group. Everyone picks their own name to see their match and edit their gift wishes.</p>
+        <p class="muted">Share this link with the whole group. Everyone selects their name, creates a four-digit PIN on first use, and enters it on later visits.</p>
         <div class="notice save-notice"><strong>Your exchange is saved.</strong> This same link works for everyone in the exchange. Refreshing won’t change anyone’s match.</div>
         <% if (imported) { %><p class="notice">This exchange came from older invitations. Remaining participants and their links will appear as they open their original invitations.</p><% } %>
         <label class="field-label" for="exchange-link">Shared exchange link</label>
         <input id="exchange-link" type="text" value="<%= sharedUrl %>" readonly autocomplete="off" spellcheck="false">
         <div class="shared-link-actions"><button type="button" class="button button-primary" data-copy="exchange-link">Copy exchange link <span aria-hidden="true">↗</span></button><a class="text-button" href="<%= sharedUrl %>" target="_blank" rel="noopener noreferrer">Open shared link ↗</a></div>
-        <p class="card-footnote">Valid until <%= expiresAt %>. Share only with your group; anyone with this link can select a name.</p>
+        <p class="card-footnote">Valid until <%= expiresAt %>. Share only with your group. Each person should claim their own name first.</p>
       <% } else { %>
         <div class="empty-links"><%- include('partials/gift') %><h3>A little suspense is a good thing.</h3><p>Your group’s shared link will appear here<br>after you generate the assignments.</p></div>
       <% } %>
     </section>
   </div>
+  <% if (drawId) { %>
+  <details class="panel pin-management">
+    <summary>Participant PINs</summary>
+    <p class="muted">Reset a forgotten or incorrectly claimed PIN. This signs that person out; their assignment and wishes stay saved.</p>
+    <% pinParticipants.forEach(person => { %>
+    <div class="pin-management-row"><span><%= person.name %></span><span class="pin-status muted"><%= person.hasPin ? 'PIN set' : 'Not set yet' %></span>
+      <% if (person.hasPin) { %><form method="post" action="/admin/reset-pin"><input type="hidden" name="_csrf" value="<%= csrf %>"><input type="hidden" name="drawId" value="<%= drawId %>"><input type="hidden" name="name" value="<%= person.name %>"><button class="text-button" type="submit" aria-label="Reset PIN for <%= person.name %>">Reset PIN</button></form><% } %>
+    </div>
+    <% }); %>
+  </details>
+  <% } %>
   <div class="organizer-notes"><span aria-hidden="true">✦</span><p>Fairly shuffled. Privately shared. Every person gives one gift and receives one, with no self matches.</p></div>
   <noscript><p class="notice">Select and copy the shared link manually. Participants can paste it into the invitation form to choose their name without JavaScript.</p></noscript>
 </main>

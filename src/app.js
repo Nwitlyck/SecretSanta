@@ -125,6 +125,8 @@ export function createApp(config, { database } = {}) {
       participantCount: draw?.participants.length || 0,
       expiresAt: draw ? new Date(draw.sharedExpiresAt * 1000).toISOString().slice(0, 10) : null,
       draws: store.listDraws(), imported: Boolean(draw?.imported),
+      pinParticipants: draw?.participants.map(person => ({ name: person.name, hasPin: Boolean(person.pin_hash) })) || [],
+      pinReset: req.query.pinreset === '1',
       ...options,
     });
   }
@@ -156,10 +158,19 @@ export function createApp(config, { database } = {}) {
       ...options,
     });
   }
+  function renderPin(req, res, assignment, options = {}) {
+    const state = store.getPinState(assignment.drawId, assignment.giver);
+    const draw = store.getDraw(assignment.drawId);
+    return res.render('participant-pin', {
+      page: 'home', name: assignment.giver, token: draw.sharedToken,
+      setupRequired: state.setupRequired, retryAfter: state.retryAfter,
+      error: null, ...options,
+    });
+  }
   const requireParticipant = (req, res, next) => {
     const session = participantSession(req, res);
-    if (!session) {
-      if (req.path === '/wishes/recipient') return res.status(401).json({ error: 'Abre tu invitación de nuevo para ver los deseos.' });
+    if (!session?.assignment.pinVerified) {
+      if (req.path === '/wishes/recipient') return res.status(401).json({ error: 'Abre tu invitación e ingresa tu PIN para ver los deseos.' });
       return res.redirect(303, '/reveal');
     }
     req.assignment = session.assignment;
@@ -170,6 +181,7 @@ export function createApp(config, { database } = {}) {
     const session = participantSession(req, res, true);
     if (session) {
       setCookie(res, 'participant', session.token, ASSIGNMENT_TTL);
+      if (!session.assignment.pinVerified) return renderPin(req, res, session.assignment);
       return renderReveal(req, res, session.assignment);
     }
     if (req.cookies[names.participant] || req.signedCookies[names.participant] !== undefined) clearCookie(res, 'participant');
@@ -177,9 +189,9 @@ export function createApp(config, { database } = {}) {
     return res.render('landing', { error: null, page: 'home' });
   }
   app.get(['/', '/reveal'], showPortal);
-  function startParticipantSession(req, res, assignment) {
+  function startParticipantSession(req, res, sessionToken) {
     store.deleteSession(req.signedCookies[names.participant]);
-    setCookie(res, 'participant', store.createParticipantSession(assignment), ASSIGNMENT_TTL);
+    setCookie(res, 'participant', sessionToken, ASSIGNMENT_TTL);
     setCookie(res, 'csrf', randomBytes(32).toString('hex'), ADMIN_TTL);
     clearCookie(res, 'assignment');
     return res.redirect(303, '/reveal');
@@ -198,7 +210,11 @@ export function createApp(config, { database } = {}) {
     if (!assignment) {
       return res.status(400).render('landing', { page: 'home', error: 'Esta invitación no es válida o ya venció. Pídele el enlace original a quien organiza el intercambio.' });
     }
-    return startParticipantSession(req, res, assignment);
+    // Old personal links migrate to an unverified session, never around the PIN.
+    store.deleteSession(req.signedCookies[names.participant]);
+    setCookie(res, 'participant', store.createParticipantSession(assignment), ASSIGNMENT_TTL);
+    clearCookie(res, 'assignment');
+    return renderPin(req, res, assignment);
   });
   app.post('/exchange/join', csrfProtection, (req, res) => {
     const token = typeof req.body.token === 'string' ? req.body.token : '';
@@ -210,7 +226,29 @@ export function createApp(config, { database } = {}) {
     if (!assignment) return res.status(400).render('choose-participant', {
       page: 'home', exchange, token, error: 'Elige tu nombre de la lista. Si aparece pendiente, abre tu invitación original para recuperar tu asignación.',
     });
-    return startParticipantSession(req, res, assignment);
+    return renderPin(req, res, assignment);
+  });
+  app.post('/exchange/unlock', csrfProtection, async (req, res) => {
+    const result = await store.unlockParticipant({
+      token: req.body.token, name: req.body.name, pin: req.body.pin,
+      confirmation: req.body.confirmation, mode: req.body.mode,
+      existingSession: req.signedCookies[names.participant],
+    });
+    if (!result.ok) {
+      if (!result.assignment || result.code === 'invalid') return res.status(400).render('landing', {
+        page: 'home', error: 'Este enlace no es válido o ya venció. Abre tu invitación de nuevo.',
+      });
+      const messages = {
+        format: 'El PIN debe tener exactamente 4 números.',
+        confirmation: 'Los PIN no coinciden. Escríbelos de nuevo.',
+        changed: 'El PIN de este nombre cambió. Ingresa el PIN actual para continuar.',
+        incorrect: 'Ese PIN no coincide. Inténtalo de nuevo.',
+        locked: `Demasiados intentos. Inténtalo de nuevo en ${Math.ceil(result.retryAfter / 60)} minutos.`,
+      };
+      if (result.retryAfter) res.set('Retry-After', String(result.retryAfter));
+      return renderPin(req, res.status(result.status), result.assignment, { error: messages[result.code] });
+    }
+    return startParticipantSession(req, res, result.sessionToken);
   });
   app.post('/forget', csrfProtection, (req, res) => {
     store.deleteSession(req.signedCookies[names.participant]);
@@ -267,6 +305,13 @@ export function createApp(config, { database } = {}) {
     catch (error) { return renderDashboard(req, res.status(400), { participants: input, error: error.message }); }
     const drawId = store.createDraw(participants);
     return res.redirect(303, `/admin?draw=${drawId}`);
+  });
+  app.post('/admin/reset-pin', requireAdmin, csrfProtection, (req, res) => {
+    if (!store.resetPin(req.body.drawId, req.body.name)) return renderError(res, 404, {
+      en: ['Participant not found', 'Open the saved exchange and try again.'],
+      es: ['No encontramos a esa persona', 'Abre el intercambio guardado e inténtalo de nuevo.'],
+    });
+    return res.redirect(303, `/admin?draw=${encodeURIComponent(req.body.drawId)}&pinreset=1`);
   });
   app.use((_req, res) => renderError(res, 404, {
     en: ['A little lost?', 'This page doesn’t exist. Your invitation link will take you to the right place.'],

@@ -42,3 +42,12 @@
 .shared-link-actions{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-top:16px}
 .change-name{display:inline-block;margin:0 0 10px}
 @media(max-width:720px){.choose-page{margin:40px auto 50px}.choose-page h1{font-size:48px}.choose-page>p{font-size:12px}}
+.pin-input{max-width:220px;font-size:24px!important;letter-spacing:.6em}
+.pin-help{margin:10px 0 18px}
+.pin-management{margin-top:24px}
+.pin-management>summary{cursor:pointer;font-family:var(--serif);font-size:22px}
+.pin-management>p{font-size:12px;margin:14px 0}
+.pin-management-row{display:flex;align-items:center;gap:16px;padding:12px 0;border-top:1px solid var(--line);font-size:12px;overflow-wrap:anywhere}
+.pin-management-row>span:first-child{flex:1;min-width:0}
+.pin-status{font-size:10px;white-space:nowrap}
+.pin-management-row button{white-space:nowrap}

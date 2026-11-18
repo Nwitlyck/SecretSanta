@@ -5,7 +5,7 @@
   <p class="muted">Elige tu nombre para descubrir a quién le regalas<br>y escribir lo que te gustaría recibir.</p>
   <section class="panel choose-panel" aria-labelledby="choose-heading">
     <div class="card-heading"><span class="step-dot">01</span><h2 id="choose-heading">Busca tu nombre</h2></div>
-    <p class="muted">Todo el grupo usa este mismo enlace. Selecciona tu nombre y continúa.</p>
+    <p class="muted">Selecciona tu nombre. Después ingresa tu PIN o crea uno si es tu primera vez.</p>
     <% if (error) { %><p class="notice error" role="alert"><%= error %></p><% } %>
     <form method="post" action="/exchange/join" id="choose-participant-form">
       <input type="hidden" name="_csrf" value="<%= csrf %>">
@@ -17,7 +17,7 @@
         <option value="<%= person.name %>" <%= person.available ? '' : 'disabled' %>><%= person.name %><%= person.available ? '' : ' (pendiente)' %></option>
         <% }); %>
       </select>
-      <button class="button button-primary full-width" type="submit">Ver mi intercambio <span aria-hidden="true">↗</span></button>
+      <button class="button button-primary full-width" type="submit">Continuar <span aria-hidden="true">↗</span></button>
     </form>
     <p class="card-footnote">Elige solo tu nombre para mantener la sorpresa.</p>
   </section>

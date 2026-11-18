@@ -8,7 +8,7 @@ import { createHash, createHmac, hkdfSync } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { createApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
-import { createDatabase } from '../src/database.js';
+import { createDatabase, PIN_LOCK_SECONDS, PIN_MAX_ATTEMPTS } from '../src/database.js';
 import { createAssignments, parseParticipants } from '../src/matching.js';
 import { ADMIN_TTL, ASSIGNMENT_TTL, createTokenService } from '../src/tokens.js';
 import { MAX_WISH_LENGTH } from '../src/wishes.js';
@@ -95,12 +95,21 @@ const getLinks = page => [...page.text.matchAll(/id="exchange-link" type="text" 
 async function redeem(browser, invitation, name = 'Alice') {
   const page = await browser.request('/');
   const response = await browser.request('/reveal', { _csrf: page.csrf, token: invitation });
-  if (response.status === 200) {
-    assert.match(response.text, /id="choose-participant-form"/u);
+  let challenge = response;
+  if (response.text.includes('id="choose-participant-form"')) {
     const token = invitation.startsWith('http') ? new URL(invitation).hash.slice(7) : invitation;
-    const selected = await browser.request('/exchange/join', { _csrf: response.csrf, token, name });
-    assert.equal(selected.status, 303);
-  } else assert.equal(response.status, 303);
+    challenge = await browser.request('/exchange/join', { _csrf: response.csrf, token, name });
+  }
+  return completePin(browser, challenge, name);
+}
+async function completePin(browser, challenge, name, pin = '0426') {
+  assert.equal(challenge.status, 200);
+  assert.match(challenge.text, /id="pin-form"/u);
+  assert.doesNotMatch(challenge.text, /class="recipient"/u);
+  const token = challenge.text.match(/name="token" value="([^"]+)"/u)[1];
+  const mode = challenge.text.match(/name="mode" value="([^"]+)"/u)[1];
+  const unlocked = await browser.request('/exchange/unlock', { _csrf: challenge.csrf, token, name, pin, confirmation: pin, mode });
+  assert.equal(unlocked.status, 303);
   return browser.request('/reveal');
 }
 function legacyCookie(token, secret) {
@@ -303,7 +312,8 @@ test('legacy invitations, participant cookies, admin cookies, and saved wishes m
   assert.match((await redeem(alice, token)).text, /Mis deseos anteriores/u);
   const oldBob = legacy.seal('assignment', { giver: 'Bob', recipient: 'Alice', drawId }, ASSIGNMENT_TTL);
   const bob = f.client(new Map([['santa_assignment', legacyCookie(oldBob, legacy.cookieSecret)]]));
-  assert.match((await bob.request('/reveal')).text, /Mis deseos anteriores/u);
+  const bobChallenge = await bob.request('/reveal');
+  assert.match((await completePin(bob, bobChallenge, 'Bob')).text, /Mis deseos anteriores/u);
   assert.equal(bob.cookies.has('santa_assignment'), false);
   assert.ok(bob.cookies.has('santa_participant'));
   const fingerprint = createHash('sha256').update(env.ADMIN_PASSWORD).digest('hex');
@@ -383,8 +393,8 @@ test('one shared link lets everyone select a saved name without exposing pairing
     assert.doesNotMatch(picker.text, /class="recipient"|recipient_name|invitation_token/u);
     assert.equal(browser.cookies.has('santa_participant'), false);
     const selected = await browser.request('/exchange/join', { _csrf: picker.csrf, token: draw.sharedToken, name: person.name });
-    assert.equal(selected.status, 303);
-    const reveal = await browser.request('/reveal');
+    assert.equal(selected.status, 200);
+    const reveal = await completePin(browser, selected, person.name);
     assert.match(reveal.text, new RegExp(`class="recipient">${person.recipient_name}<`));
   }
   assert.deepEqual(f.database.getDraw(id).participants.map(person => [person.name, person.recipient_name]), pairings);
@@ -447,4 +457,124 @@ test('previous SQLite draws receive stable shared links without losing assignmen
   const second = await fixture(t, { filename });
   assert.equal(second.database.getDraw(id).sharedToken, migrated.sharedToken);
   await redeem(second.client(), migrated.sharedToken, 'Bob');
+});
+
+async function pinChallenge(browser, token, name = 'Alice') {
+  const page = await browser.request('/');
+  return browser.request('/exchange/join', { _csrf: page.csrf, token, name });
+}
+
+test('PIN setup validates four digits and confirmation; later visits require the saved PIN', async t => {
+  const f = await fixture(t);
+  const id = f.database.createDraw(['Alice', 'Bob']);
+  const token = f.database.getDraw(id).sharedToken;
+  const browser = f.client();
+  const challenge = await pinChallenge(browser, token);
+  assert.match(challenge.text, /Crea tu PIN/u);
+  assert.equal(browser.cookies.has('santa_participant'), false);
+  const submit = fields => browser.request('/exchange/unlock', { _csrf: challenge.csrf, token, name: 'Alice', mode: 'setup', ...fields });
+  assert.equal((await submit({ pin: '0123', confirmation: '0123', _csrf: '' })).status, 403);
+  for (const pin of ['123', '12345', '12ab', '１２３４', ' 123', '']) {
+    assert.equal((await submit({ pin, confirmation: pin })).status, 400);
+    assert.equal(f.database.getPinState(id, 'Alice').setupRequired, true);
+  }
+  assert.equal((await submit({ pin: '0123', confirmation: '9876' })).status, 400);
+  assert.equal((await submit({ pin: '0123', confirmation: '0123' })).status, 303);
+  const row = f.database.getDraw(id).participants.find(person => person.name === 'Alice');
+  assert.match(row.pin_hash, /^[a-f0-9]{64}$/u);
+  assert.match(row.pin_salt, /^[a-f0-9]{32}$/u);
+  assert.notEqual(row.pin_hash, '0123');
+  assert.match((await browser.request('/reveal')).text, /class="recipient">Bob</u);
+  const stranger = f.client();
+  const loginPage = await pinChallenge(stranger, token);
+  assert.match(loginPage.text, /Ingresa tu PIN/u);
+  assert.doesNotMatch(loginPage.text, /name="confirmation"|class="recipient"/u);
+  const attempt = fields => stranger.request('/exchange/unlock', { _csrf: loginPage.csrf, token, name: 'Alice', mode: 'login', ...fields });
+  const wrong = await attempt({ pin: '9876' });
+  assert.equal(wrong.status, 401);
+  assert.doesNotMatch(wrong.text, /value="9876"|class="recipient"/u);
+  assert.equal((await stranger.request('/wishes/recipient')).status, 401);
+  assert.equal((await attempt({ pin: '9999', confirmation: '9999', mode: 'setup' })).status, 409);
+  assert.equal((await attempt({ pin: '0123' })).status, 303);
+  assert.equal(f.database.getDraw(id).participants.find(person => person.name === 'Alice').pin_hash, row.pin_hash);
+});
+
+test('five wrong PIN attempts lock the name for 15 minutes, including across restarts', async t => {
+  const filename = await temporaryDatabase(t);
+  let now = Math.floor(Date.now() / 1000);
+  const first = await fixture(t, { filename, clock: () => now });
+  const id = first.database.createDraw(['Alice', 'Bob']);
+  const token = first.database.getDraw(id).sharedToken;
+  assert.equal((await first.database.unlockParticipant({ token, name: 'Alice', pin: '0123', confirmation: '0123', mode: 'setup' })).ok, true);
+  const browser = first.client();
+  const page = await pinChallenge(browser, token);
+  for (let n = 1; n <= PIN_MAX_ATTEMPTS; n++) {
+    const wrong = await browser.request('/exchange/unlock', { _csrf: page.csrf, token, name: 'Alice', pin: '9999', mode: 'login' });
+    assert.equal(wrong.status, n === PIN_MAX_ATTEMPTS ? 429 : 401);
+    if (n === PIN_MAX_ATTEMPTS) assert.equal(wrong.headers.get('retry-after'), String(PIN_LOCK_SECONDS));
+  }
+  await first.close();
+  const second = await fixture(t, { filename, clock: () => now });
+  const correct = () => second.database.unlockParticipant({ token, name: 'Alice', pin: '0123', mode: 'login' });
+  assert.equal((await correct()).status, 429);
+  now += PIN_LOCK_SECONDS;
+  assert.equal((await correct()).ok, true);
+  assert.equal(second.database.getPinState(id, 'Alice').retryAfter, 0);
+});
+
+test('concurrent first-time claims cannot overwrite the winning PIN', async t => {
+  const f = await fixture(t);
+  const id = f.database.createDraw(['Alice', 'Bob']);
+  const token = f.database.getDraw(id).sharedToken;
+  const pins = ['1111', '2222'];
+  const results = await Promise.all(pins.map(pin => f.database.unlockParticipant({ token, name: 'Alice', pin, confirmation: pin, mode: 'setup' })));
+  assert.equal(results.filter(result => result.ok).length, 1);
+  assert.equal(results.filter(result => result.status === 409).length, 1);
+  const winner = pins[results.findIndex(result => result.ok)];
+  assert.equal((await f.database.unlockParticipant({ token, name: 'Alice', pin: winner, mode: 'login' })).ok, true);
+});
+
+test('admin PIN reset revokes participant sessions and lets the owner set a new PIN', async t => {
+  const f = await fixture(t);
+  const id = f.database.createDraw(['Alice', 'Bob']);
+  const token = f.database.getDraw(id).sharedToken;
+  const alice = f.client(); const bob = f.client();
+  const alicePage = await redeem(alice, token, 'Alice');
+  await redeem(bob, token, 'Bob');
+  await alice.request('/wishes', { _csrf: alicePage.csrf, wishes: 'Libros' });
+  const guest = f.client();
+  assert.equal((await guest.request('/admin/reset-pin', { drawId: id, name: 'Alice' })).status, 303);
+  const admin = f.client(); const dashboard = await login(admin);
+  assert.equal((await admin.request('/admin/reset-pin', { drawId: id, name: 'Alice' })).status, 403);
+  assert.equal((await admin.request('/admin/reset-pin', { _csrf: dashboard.csrf, drawId: id, name: 'Alice' })).status, 303);
+  assert.equal((await alice.request('/wishes/recipient')).status, 401);
+  assert.equal((await bob.request('/wishes/recipient')).status, 200);
+  assert.equal(f.database.getWishes(id, 'Alice').text, 'Libros');
+  const challenge = await pinChallenge(alice, token, 'Alice');
+  assert.match(challenge.text, /Crea tu PIN/u);
+  await completePin(alice, challenge, 'Alice', '5678');
+  assert.equal((await f.database.unlockParticipant({ token, name: 'Alice', pin: '0426', mode: 'login' })).status, 401);
+});
+
+test('pre-PIN browser sessions and personal links cannot bypass setup or verification', async t => {
+  const f = await fixture(t);
+  const id = f.database.createDraw(['Alice', 'Bob']);
+  const token = f.database.getDraw(id).sharedToken;
+  const identity = f.database.chooseParticipant(token, 'Alice');
+  const oldSession = f.database.createParticipantSession(identity);
+  const browser = f.client(new Map([['santa_participant', legacyCookie(oldSession, env.SESSION_SECRET)]]));
+  const gate = await browser.request('/reveal');
+  assert.match(gate.text, /id="pin-form"/u);
+  assert.doesNotMatch(gate.text, /class="recipient"/u);
+  assert.equal((await browser.request('/wishes/recipient')).status, 401);
+  assert.equal((await browser.request('/wishes', { _csrf: gate.csrf, wishes: 'Cannot save yet' })).status, 303);
+  assert.equal(f.database.getWishes(id, 'Alice').text, '');
+  await completePin(browser, gate, 'Alice');
+  const legacy = createTokenService(env.SESSION_SECRET).seal('invitation', identity, ASSIGNMENT_TTL);
+  const attacker = f.client();
+  const page = await attacker.request('/');
+  const oldLinkGate = await attacker.request('/reveal', { _csrf: page.csrf, token: legacy });
+  assert.match(oldLinkGate.text, /Ingresa tu PIN/u);
+  assert.doesNotMatch(oldLinkGate.text, /class="recipient"/u);
+  assert.equal((await attacker.request('/wishes/recipient')).status, 401);
 });
